@@ -21,25 +21,39 @@ func main() {
 	// Command line flags
 	port := flag.String("p", "8080", "server listen port")
 	database := flag.String("d", "sqlite://data/sepiida.db", "database connection string (sqlite://path or postgres://host:port/db?user=xxx&password=xxx)")
-	keyFile := flag.String("key", "", "path to key file (contains valid API keys, one per line)")
+	agentKeyFile := flag.String("agent-key", "", "path to agent key file (keys for pushing data)")
+	queryKeyFile := flag.String("query-key", "", "path to query key file (keys for querying results)")
 	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
 	flag.Parse()
 
-	// Initialize key manager
-	if *keyFile == "" {
-		log.Fatal("Error: -key parameter is required. Please specify a key file path.")
+	// Validate key files
+	if *agentKeyFile == "" {
+		log.Fatal("Error: -agent-key parameter is required. Please specify an agent key file path.")
+	}
+	if *queryKeyFile == "" {
+		log.Fatal("Error: -query-key parameter is required. Please specify a query key file path.")
 	}
 
-	keyMgr := apikey.NewKeyManager(*keyFile)
-	keyMgr.Start(time.Duration(*keyRefresh) * time.Second)
+	// Initialize multi key manager
+	mkm := apikey.NewMultiKeyManager(*agentKeyFile, *queryKeyFile)
+	mkm.Start(time.Duration(*keyRefresh) * time.Second)
 
 	// Wait for initial key load
 	time.Sleep(100 * time.Millisecond)
-	keyCount := keyMgr.Count()
-	if keyCount == 0 {
-		log.Printf("Warning: No keys loaded from %s. Key file may be empty or not exist.", *keyFile)
+
+	agentKeyCount := mkm.AgentKeyCount()
+	queryKeyCount := mkm.QueryKeyCount()
+
+	if agentKeyCount == 0 {
+		log.Printf("Warning: No agent keys loaded from %s", *agentKeyFile)
 	} else {
-		log.Printf("Loaded %d keys from %s", keyCount, *keyFile)
+		log.Printf("Loaded %d agent keys from %s", agentKeyCount, *agentKeyFile)
+	}
+
+	if queryKeyCount == 0 {
+		log.Printf("Warning: No query keys loaded from %s", *queryKeyFile)
+	} else {
+		log.Printf("Loaded %d query keys from %s", queryKeyCount, *queryKeyFile)
 	}
 
 	// Parse database connection
@@ -61,22 +75,24 @@ func main() {
 	workflowService := service.NewWorkflowService(databaseObj)
 	progressHandler := handler.NewProgressHandler(workflowService)
 
-	// Create authentication middleware with dynamic key manager
-	authMiddleware := middleware.NewAuthMiddleware(keyMgr)
+	// Create authentication middleware
+	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager())
+	queryAuth := middleware.NewQueryAuthMiddleware(mkm.GetQueryKeyManager())
 
 	// Setup routes
 	router := http.NewServeMux()
 
-	// API routes with authentication
-	apiHandler := http.NewServeMux()
-	apiHandler.HandleFunc("/api/v1/progress", progressHandler.HandleProgress)
-	apiHandler.HandleFunc("/api/v1/workflow/output", progressHandler.HandleOutput)
-	apiHandler.HandleFunc("/api/v1/workflow", progressHandler.HandleGetWorkflow)
-	apiHandler.HandleFunc("/api/v1/workflow/tasks", progressHandler.HandleGetWorkflowTasks)
-	apiHandler.HandleFunc("/api/v1/workflows", progressHandler.HandleListWorkflows)
+	// Agent API routes (push data) - use agent auth
+	agentHandler := http.NewServeMux()
+	agentHandler.HandleFunc("/api/v1/progress", progressHandler.HandleProgress)
+	agentHandler.HandleFunc("/api/v1/workflow/output", progressHandler.HandleOutput)
+	router.Handle("/api/v1/progress", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress)))
+	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleOutput)))
 
-	// Apply authentication middleware to API routes
-	router.Handle("/api/", authMiddleware.Middleware(apiHandler))
+	// Query API routes - use query auth
+	router.Handle("/api/v1/workflow", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow)))
+	router.Handle("/api/v1/workflow/tasks", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflowTasks)))
+	router.Handle("/api/v1/workflows", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleListWorkflows)))
 
 	// Health check endpoint (no authentication required)
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -91,25 +107,28 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "keys_file: %s\nkeys_count: %d\nrefresh_interval: %ds\n", *keyFile, keyMgr.Count(), *keyRefresh)
+		fmt.Fprintf(w, "agent_keys_file: %s\nagent_keys_count: %d\nquery_keys_file: %s\nquery_keys_count: %d\nrefresh_interval: %ds\n",
+			*agentKeyFile, agentKeyCount, *queryKeyFile, queryKeyCount, *keyRefresh)
 	})
 
-	// Keys reload endpoint (force reload key file)
+	// Keys reload endpoint (force reload key files)
 	router.HandleFunc("/keys/reload", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		keyMgr.Reload()
+		mkm.ReloadAll()
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Reloaded keys from %s. Current count: %d\n", *keyFile, keyMgr.Count())
+		fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d from %s\nQuery keys: %d from %s\n",
+			mkm.AgentKeyCount(), *agentKeyFile, mkm.QueryKeyCount(), *queryKeyFile)
 	})
 
 	// Start server
 	listenAddr := ":" + *port
 	log.Printf("Starting Sepiida Server on %s", listenAddr)
 	log.Printf("Database: %s", *database)
-	log.Printf("Key File: %s (refresh every %ds)", *keyFile, *keyRefresh)
+	log.Printf("Agent Key File: %s (%d keys)", *agentKeyFile, agentKeyCount)
+	log.Printf("Query Key File: %s (%d keys)", *queryKeyFile, queryKeyCount)
 
 	if err := http.ListenAndServe(listenAddr, router); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
@@ -117,28 +136,24 @@ func main() {
 }
 
 func parseDatabaseConn(conn string) (string, string) {
-	// Format: sqlite://path or postgres://host:port/db?user=xxx&password=xxx
 	if strings.HasPrefix(conn, "sqlite://") {
 		return "sqlite", strings.TrimPrefix(conn, "sqlite://")
 	}
 	if strings.HasPrefix(conn, "postgres://") {
 		return "postgres", strings.TrimPrefix(conn, "postgres://")
 	}
-	// Default to sqlite with the path
 	return "sqlite", conn
 }
 
 func initDatabase(dbType, dbConn string) (db.Database, error) {
 	switch dbType {
 	case "sqlite":
-		// Ensure data directory exists
 		dir := strings.TrimSuffix(dbConn, "/"+strings.Split(dbConn, "/")[len(strings.Split(dbConn, "/"))-1])
 		if dir != "" && dir != dbConn {
 			os.MkdirAll(dir, 0755)
 		}
 		return db.NewSQLite(dbConn)
 	case "postgres":
-		// Parse postgres connection: host:port/database?user=xxx&password=xxx
 		return parsePostgresConn(dbConn)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)
@@ -146,7 +161,6 @@ func initDatabase(dbType, dbConn string) (db.Database, error) {
 }
 
 func parsePostgresConn(conn string) (db.Database, error) {
-	// Simple parsing: host:port/database?user=xxx&password=xxx
 	parts := strings.SplitN(conn, "?", 2)
 	hostPortDb := parts[0]
 	params := ""

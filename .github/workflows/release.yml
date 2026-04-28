@@ -112,21 +112,31 @@ jobs:
 
             ### Usage
 
-            **1. Prepare keys file:**
+            **1. Prepare key files:**
             ```bash
-            # Create keys file (one key per line)
-            echo "your-secret-key-1" > keys.txt
-            echo "your-secret-key-2" >> keys.txt
+            # Agent keys (for pushing data)
+            echo "agent-key-001" > agent-keys.txt
+
+            # Query keys (for querying results)
+            echo "query-key-001" > query-keys.txt
             ```
 
             **Server:**
             ```bash
-            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db -key keys.txt
+            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db \
+                -agent-key agent-keys.txt \
+                -query-key query-keys.txt
             ```
 
             **Agent:**
             ```bash
-            ./sepiida-agent -s http://server:8080 -key your-secret-key-1 -w /mnt/data/output
+            ./sepiida-agent -s http://server:8080 -key agent-key-001 -w /mnt/data/output
+            ```
+
+            **Query:**
+            ```bash
+            curl -H "Authorization: Bearer query-key-001" \
+                "http://server:8080/api/v1/workflow?uuid=xxx"
             ```
           files: release/*
           draft: false

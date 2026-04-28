@@ -42,6 +42,10 @@ data/
 # Binary output
 bin/
 
-# Keys file (use keys.example as template)
+# Keys files (use agent-keys.example and query-keys.example as templates)
+agent-keys.txt
+agent-keys
+query-keys.txt
+query-keys
 keys.txt
 keys

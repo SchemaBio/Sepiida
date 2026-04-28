@@ -1,0 +1,8 @@
+# Sepiida Agent Keys File
+# Keys used by agents to push progress data
+# One key per line, lines starting with # are comments
+
+# Example agent keys:
+agent-key-001
+agent-key-002
+agent-key-003

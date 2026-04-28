@@ -9,9 +9,9 @@ import (
 
 // KeyManager manages API keys from a dynamic key file
 type KeyManager struct {
-	keyFile    string
-	keys       map[string]bool
-	mu         sync.RWMutex
+	keyFile     string
+	keys        map[string]bool
+	mu          sync.RWMutex
 	lastModTime time.Time
 }
 
@@ -71,7 +71,7 @@ func (km *KeyManager) loadKeys() {
 	for scanner.Scan() {
 		line := scanner.Text()
 		// Skip empty lines and comments
-		if line == "" || line[0] == '#' {
+		if line == "" || (len(line) > 0 && line[0] == '#') {
 			continue
 		}
 		newKeys[line] = true
@@ -120,4 +120,60 @@ func (km *KeyManager) Reload() error {
 	km.mu.Unlock()
 	km.loadKeys()
 	return nil
+}
+
+// MultiKeyManager manages multiple key files (e.g., agent keys and query keys)
+type MultiKeyManager struct {
+	agentKeyMgr *KeyManager
+	queryKeyMgr *KeyManager
+}
+
+// NewMultiKeyManager creates a multi key manager
+func NewMultiKeyManager(agentKeyFile, queryKeyFile string) *MultiKeyManager {
+	return &MultiKeyManager{
+		agentKeyMgr: NewKeyManager(agentKeyFile),
+		queryKeyMgr: NewKeyManager(queryKeyFile),
+	}
+}
+
+// Start starts all key managers
+func (mkm *MultiKeyManager) Start(interval time.Duration) {
+	mkm.agentKeyMgr.Start(interval)
+	mkm.queryKeyMgr.Start(interval)
+}
+
+// ValidateAgentKey checks if a key is valid for agent operations (push data)
+func (mkm *MultiKeyManager) ValidateAgentKey(key string) bool {
+	return mkm.agentKeyMgr.Validate(key)
+}
+
+// ValidateQueryKey checks if a key is valid for query operations
+func (mkm *MultiKeyManager) ValidateQueryKey(key string) bool {
+	return mkm.queryKeyMgr.Validate(key)
+}
+
+// GetAgentKeyManager returns the agent key manager
+func (mkm *MultiKeyManager) GetAgentKeyManager() *KeyManager {
+	return mkm.agentKeyMgr
+}
+
+// GetQueryKeyManager returns the query key manager
+func (mkm *MultiKeyManager) GetQueryKeyManager() *KeyManager {
+	return mkm.queryKeyMgr
+}
+
+// AgentKeyCount returns the number of agent keys
+func (mkm *MultiKeyManager) AgentKeyCount() int {
+	return mkm.agentKeyMgr.Count()
+}
+
+// QueryKeyCount returns the number of query keys
+func (mkm *MultiKeyManager) QueryKeyCount() int {
+	return mkm.queryKeyMgr.Count()
+}
+
+// ReloadAll forces reload of all key files
+func (mkm *MultiKeyManager) ReloadAll() {
+	mkm.agentKeyMgr.Reload()
+	mkm.queryKeyMgr.Reload()
 }
