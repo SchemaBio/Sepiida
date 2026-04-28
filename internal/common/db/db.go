@@ -27,12 +27,6 @@ type Database interface {
 	UpdateTask(ctx context.Context, task *model.Task) error
 	GetTask(ctx context.Context, id string) (*model.Task, error)
 	GetTasksByWorkflow(ctx context.Context, workflowID string) ([]*model.Task, error)
-
-	// API Key operations
-	ValidateAPIKey(ctx context.Context, key string) (bool, error)
-	CreateAPIKey(ctx context.Context, key, description string) error
-	ListAPIKeys(ctx context.Context) ([]string, error)
-	DeleteAPIKey(ctx context.Context, key string) error
 }
 
 // Config represents database configuration

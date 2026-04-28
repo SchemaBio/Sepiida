@@ -59,12 +59,6 @@ func (s *SQLite) Initialize(ctx context.Context) error {
 			FOREIGN KEY (workflow_id) REFERENCES workflows(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_uuid ON tasks(uuid)`,
-		`CREATE TABLE IF NOT EXISTS api_keys (
-			key TEXT PRIMARY KEY,
-			description TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			is_active BOOLEAN DEFAULT true
-		)`,
 	}
 
 	for _, query := range queries {
@@ -256,54 +250,4 @@ func (s *SQLite) GetTasksByWorkflow(ctx context.Context, workflowID string) ([]*
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
-}
-
-// ValidateAPIKey checks if an API key is valid
-func (s *SQLite) ValidateAPIKey(ctx context.Context, key string) (bool, error) {
-	query := `SELECT is_active FROM api_keys WHERE key=?`
-	row := s.db.QueryRowContext(ctx, query, key)
-
-	var isActive bool
-	err := row.Scan(&isActive)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return false, err
-	}
-	return isActive, nil
-}
-
-// CreateAPIKey creates a new API key
-func (s *SQLite) CreateAPIKey(ctx context.Context, key, description string) error {
-	query := `INSERT INTO api_keys (key, description, created_at, is_active) VALUES (?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, key, description, time.Now(), true)
-	return err
-}
-
-// ListAPIKeys lists all API keys
-func (s *SQLite) ListAPIKeys(ctx context.Context) ([]string, error) {
-	query := `SELECT key FROM api_keys WHERE is_active=true`
-	rows, err := s.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var keys []string
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, nil
-}
-
-// DeleteAPIKey deletes an API key
-func (s *SQLite) DeleteAPIKey(ctx context.Context, key string) error {
-	query := `DELETE FROM api_keys WHERE key=?`
-	_, err := s.db.ExecContext(ctx, query, key)
-	return err
 }

@@ -1,0 +1,8 @@
+# Sepiida API Keys File
+# One key per line, lines starting with # are comments
+# Keys are loaded dynamically - file changes are detected automatically
+
+# Example keys (replace with your actual keys):
+key-for-agent-001
+key-for-agent-002
+key-for-agent-003

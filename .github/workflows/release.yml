@@ -112,14 +112,21 @@ jobs:
 
             ### Usage
 
+            **1. Prepare keys file:**
+            ```bash
+            # Create keys file (one key per line)
+            echo "your-secret-key-1" > keys.txt
+            echo "your-secret-key-2" >> keys.txt
+            ```
+
             **Server:**
             ```bash
-            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db -key your-secret-key
+            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db -key keys.txt
             ```
 
             **Agent:**
             ```bash
-            ./sepiida-agent -s http://server:8080 -key your-secret-key -w /mnt/data/output
+            ./sepiida-agent -s http://server:8080 -key your-secret-key-1 -w /mnt/data/output
             ```
           files: release/*
           draft: false

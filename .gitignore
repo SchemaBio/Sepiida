@@ -41,3 +41,7 @@ data/
 
 # Binary output
 bin/
+
+# Keys file (use keys.example as template)
+keys.txt
+keys

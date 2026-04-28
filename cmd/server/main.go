@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/db"
 	"github.com/SchemaBio/Sepiida/internal/server/handler"
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
@@ -19,14 +21,25 @@ func main() {
 	// Command line flags
 	port := flag.String("p", "8080", "server listen port")
 	database := flag.String("d", "sqlite://data/sepiida.db", "database connection string (sqlite://path or postgres://host:port/db?user=xxx&password=xxx)")
-	apiKeys := flag.String("key", "", "API keys (comma separated)")
+	keyFile := flag.String("key", "", "path to key file (contains valid API keys, one per line)")
+	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
 	flag.Parse()
 
-	// Parse API keys
-	keys := parseAPIKeys(*apiKeys)
-	if len(keys) == 0 {
-		keys = []string{"default-api-key"}
-		log.Println("Warning: using default API key. Please specify -key for production use.")
+	// Initialize key manager
+	if *keyFile == "" {
+		log.Fatal("Error: -key parameter is required. Please specify a key file path.")
+	}
+
+	keyMgr := apikey.NewKeyManager(*keyFile)
+	keyMgr.Start(time.Duration(*keyRefresh) * time.Second)
+
+	// Wait for initial key load
+	time.Sleep(100 * time.Millisecond)
+	keyCount := keyMgr.Count()
+	if keyCount == 0 {
+		log.Printf("Warning: No keys loaded from %s. Key file may be empty or not exist.", *keyFile)
+	} else {
+		log.Printf("Loaded %d keys from %s", keyCount, *keyFile)
 	}
 
 	// Parse database connection
@@ -44,19 +57,12 @@ func main() {
 		log.Fatalf("Failed to initialize database tables: %v", err)
 	}
 
-	// Create initial API keys
-	for _, key := range keys {
-		if err := databaseObj.CreateAPIKey(context.Background(), key, "cli-provided"); err != nil {
-			log.Printf("Note: API key may already exist: %v", err)
-		}
-	}
-
 	// Create service and handler
 	workflowService := service.NewWorkflowService(databaseObj)
 	progressHandler := handler.NewProgressHandler(workflowService)
 
-	// Create authentication middleware
-	authMiddleware := middleware.NewAuthMiddleware(databaseObj.ValidateAPIKey)
+	// Create authentication middleware with dynamic key manager
+	authMiddleware := middleware.NewAuthMiddleware(keyMgr)
 
 	// Setup routes
 	router := http.NewServeMux()
@@ -78,22 +84,36 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
+	// Keys status endpoint (no authentication, shows key count)
+	router.HandleFunc("/keys/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "keys_file: %s\nkeys_count: %d\nrefresh_interval: %ds\n", *keyFile, keyMgr.Count(), *keyRefresh)
+	})
+
+	// Keys reload endpoint (force reload key file)
+	router.HandleFunc("/keys/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		keyMgr.Reload()
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Reloaded keys from %s. Current count: %d\n", *keyFile, keyMgr.Count())
+	})
+
 	// Start server
 	listenAddr := ":" + *port
 	log.Printf("Starting Sepiida Server on %s", listenAddr)
 	log.Printf("Database: %s", *database)
-	log.Printf("API Keys: %d keys configured", len(keys))
+	log.Printf("Key File: %s (refresh every %ds)", *keyFile, *keyRefresh)
 
 	if err := http.ListenAndServe(listenAddr, router); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
-}
-
-func parseAPIKeys(keyStr string) []string {
-	if keyStr == "" {
-		return nil
-	}
-	return strings.Split(keyStr, ",")
 }
 
 func parseDatabaseConn(conn string) (string, string) {
@@ -118,7 +138,7 @@ func initDatabase(dbType, dbConn string) (db.Database, error) {
 		}
 		return db.NewSQLite(dbConn)
 	case "postgres":
-		// Parse postgres connection: host:port/db?user=xxx&password=xxx
+		// Parse postgres connection: host:port/database?user=xxx&password=xxx
 		return parsePostgresConn(dbConn)
 	default:
 		return nil, fmt.Errorf("unsupported database type: %s", dbType)

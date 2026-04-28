@@ -4,16 +4,18 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 )
 
 // AuthMiddleware provides API key authentication
 type AuthMiddleware struct {
-	validateKey func(ctx context.Context, key string) (bool, error)
+	keyMgr *apikey.KeyManager
 }
 
 // NewAuthMiddleware creates a new authentication middleware
-func NewAuthMiddleware(validateKey func(ctx context.Context, key string) (bool, error)) *AuthMiddleware {
-	return &AuthMiddleware{validateKey: validateKey}
+func NewAuthMiddleware(keyMgr *apikey.KeyManager) *AuthMiddleware {
+	return &AuthMiddleware{keyMgr: keyMgr}
 }
 
 // Middleware returns the authentication middleware function
@@ -35,14 +37,8 @@ func (a *AuthMiddleware) Middleware(next http.Handler) http.Handler {
 
 		apiKey := parts[1]
 
-		// Validate API key
-		valid, err := a.validateKey(r.Context(), apiKey)
-		if err != nil {
-			http.Error(w, "failed to validate api key", http.StatusInternalServerError)
-			return
-		}
-
-		if !valid {
+		// Validate API key using dynamic key manager
+		if !a.keyMgr.Validate(apiKey) {
 			http.Error(w, "invalid api key", http.StatusUnauthorized)
 			return
 		}
