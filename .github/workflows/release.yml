@@ -1,0 +1,126 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: ''
+          - goos: linux
+            goarch: arm64
+            suffix: ''
+          - goos: windows
+            goarch: amd64
+            suffix: '.exe'
+          - goos: darwin
+            goarch: amd64
+            suffix: ''
+          - goos: darwin
+            goarch: arm64
+            suffix: ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags="-s -w" -o bin/sepiida-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} ./cmd/server
+
+      - name: Build Agent
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags="-s -w" -o bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} ./cmd/agent
+
+      - name: Upload Server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sepiida-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/sepiida-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+
+      - name: Upload Agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Move all binaries to release directory
+          find artifacts -type f -exec mv {} release/ \;
+          # List files
+          ls -la release/
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          body: |
+            ## Sepiida ${{ steps.get_version.outputs.VERSION }}
+
+            ### Downloads
+
+            | Platform | Server | Agent |
+            |----------|--------|-------|
+            | Linux AMD64 | sepiida-server-linux-amd64 | sepiida-agent-linux-amd64 |
+            | Linux ARM64 | sepiida-server-linux-arm64 | sepiida-agent-linux-arm64 |
+            | Windows AMD64 | sepiida-server-windows-amd64.exe | sepiida-agent-windows-amd64.exe |
+            | macOS AMD64 | sepiida-server-darwin-amd64 | sepiida-agent-darwin-amd64 |
+            | macOS ARM64 | sepiida-server-darwin-arm64 | sepiida-agent-darwin-arm64 |
+
+            ### Usage
+
+            **Server:**
+            ```bash
+            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db -key your-secret-key
+            ```
+
+            **Agent:**
+            ```bash
+            ./sepiida-agent -s http://server:8080 -key your-secret-key -w /mnt/data/output
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
