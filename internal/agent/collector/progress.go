@@ -43,6 +43,7 @@ func NewProgressCollector(parser *parser.LogParser, watchDirs []string, agentID 
 // Returns only workflows that need to be pushed (state changed)
 func (c *ProgressCollector) Collect() ([]CollectResult, error) {
 	var results []CollectResult
+	var err error
 
 	for _, dir := range c.watchDirs {
 		results, err = c.collectFromDir(dir, results)
