@@ -159,14 +159,14 @@ curl -H "Authorization: Bearer my-query-key-001" \
 | `GET /api/v1/workflow?id=xxx` | 通过ID查询 |
 | `GET /api/v1/workflow/tasks?id=xxx` | 查询Tasks |
 | `GET /api/v1/workflows` | 列出所有Workflows |
+| `GET /api/v1/keys/status` | 查看Key状态 |
+| `POST /api/v1/keys/reload` | 强制重新加载Key文件 |
 
-### 管理API（无需认证）
+### 公开API（无需认证）
 
 | 接口 | 说明 |
 |------|------|
 | `GET /health` | 健康检查 |
-| `GET /keys/status` | 查看Key状态 |
-| `POST /keys/reload` | 强制重新加载Key文件 |
 
 ## 双重Key机制
 
@@ -185,7 +185,14 @@ curl -H "Authorization: Bearer my-query-key-001" \
 - Server定时检查Key文件修改时间
 - 文件修改后自动重新加载
 - 修改Key文件后最多等待刷新间隔即可生效
-- 可通过 `POST /keys/reload` 强制立即刷新
+- 可通过 `POST /api/v1/keys/reload` 强制立即刷新（需Query Key认证）
+
+**示例：**
+```bash
+# 强制重新加载Key文件（需要Query Key）
+curl -X POST -H "Authorization: Bearer my-query-key-001" \
+    "http://localhost:8080/api/v1/keys/reload"
+```
 
 ## 数据库设计
 

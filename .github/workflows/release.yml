@@ -137,6 +137,10 @@ jobs:
             ```bash
             curl -H "Authorization: Bearer query-key-001" \
                 "http://server:8080/api/v1/workflow?uuid=xxx"
+
+            # Force reload keys (requires query key)
+            curl -X POST -H "Authorization: Bearer query-key-001" \
+                "http://server:8080/api/v1/keys/reload"
             ```
           files: release/*
           draft: false

@@ -83,9 +83,6 @@ func main() {
 	router := http.NewServeMux()
 
 	// Agent API routes (push data) - use agent auth
-	agentHandler := http.NewServeMux()
-	agentHandler.HandleFunc("/api/v1/progress", progressHandler.HandleProgress)
-	agentHandler.HandleFunc("/api/v1/workflow/output", progressHandler.HandleOutput)
 	router.Handle("/api/v1/progress", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress)))
 	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleOutput)))
 
@@ -94,33 +91,38 @@ func main() {
 	router.Handle("/api/v1/workflow/tasks", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflowTasks)))
 	router.Handle("/api/v1/workflows", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleListWorkflows)))
 
+	// Keys management API - use query auth (requires query key to access)
+	keysHandler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/keys/status":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "agent_keys_file: %s\nagent_keys_count: %d\nquery_keys_file: %s\nquery_keys_count: %d\nrefresh_interval: %ds\n",
+				*agentKeyFile, mkm.AgentKeyCount(), *queryKeyFile, mkm.QueryKeyCount(), *keyRefresh)
+
+		case "/api/v1/keys/reload":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			mkm.ReloadAll()
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d from %s\nQuery keys: %d from %s\n",
+				mkm.AgentKeyCount(), *agentKeyFile, mkm.QueryKeyCount(), *queryKeyFile)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}
+	router.Handle("/api/v1/keys/", queryAuth.Middleware(http.HandlerFunc(keysHandler)))
+
 	// Health check endpoint (no authentication required)
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
-	})
-
-	// Keys status endpoint (no authentication, shows key count)
-	router.HandleFunc("/keys/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "agent_keys_file: %s\nagent_keys_count: %d\nquery_keys_file: %s\nquery_keys_count: %d\nrefresh_interval: %ds\n",
-			*agentKeyFile, agentKeyCount, *queryKeyFile, queryKeyCount, *keyRefresh)
-	})
-
-	// Keys reload endpoint (force reload key files)
-	router.HandleFunc("/keys/reload", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		mkm.ReloadAll()
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d from %s\nQuery keys: %d from %s\n",
-			mkm.AgentKeyCount(), *agentKeyFile, mkm.QueryKeyCount(), *queryKeyFile)
 	})
 
 	// Start server
