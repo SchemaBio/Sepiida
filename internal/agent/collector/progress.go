@@ -45,7 +45,7 @@ func (c *ProgressCollector) Collect() ([]CollectResult, error) {
 	var results []CollectResult
 
 	for _, dir := range c.watchDirs {
-		results, err := c.collectFromDir(dir, results)
+		results, err = c.collectFromDir(dir, results)
 		if err != nil {
 			return nil, err
 		}

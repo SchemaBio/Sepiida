@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // SQLite implements Database interface using SQLite

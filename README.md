@@ -227,7 +227,7 @@ CREATE INDEX idx_tasks_uuid ON tasks(uuid);
 ## 依赖
 
 - Go 1.21+
-- SQLite3 或 PostgreSQL
+- PostgreSQL（可选）- SQLite使用纯Go实现，无需C编译器
 
 ## License
 
