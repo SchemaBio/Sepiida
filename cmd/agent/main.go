@@ -21,6 +21,8 @@ func main() {
 	interval := flag.Int("i", 60, "poll interval in seconds")
 	watchDirs := flag.String("w", "", "watch directories (comma separated, should contain UUID directories)")
 	archivePath := flag.String("archive", "", "archive destination (local path, s3://, oss://, cos://, or http(s)://minio)")
+	archiveKeyID := flag.String("archive-key-id", "", "access key ID for object storage (overrides env vars)")
+	archiveKeySecret := flag.String("archive-key-secret", "", "secret access key for object storage (overrides env vars)")
 	flag.Parse()
 
 	// Parse watch directories
@@ -52,7 +54,7 @@ func main() {
 	var arch *archiver.Archiver
 	if *archivePath != "" {
 		var err error
-		arch, err = archiver.NewFromPath(*archivePath)
+		arch, err = archiver.NewFromPath(*archivePath, *archiveKeyID, *archiveKeySecret)
 		if err != nil {
 			log.Fatalf("Failed to initialize archiver: %v", err)
 		}

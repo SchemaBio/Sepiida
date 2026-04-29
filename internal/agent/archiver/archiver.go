@@ -22,17 +22,19 @@ func NewArchiver(backend Backend) *Archiver {
 }
 
 // NewFromPath creates an Archiver by auto-detecting the backend from the path.
+// If accessKeyID and secretAccessKey are non-empty, they are used for S3-compatible
+// storage instead of reading from environment variables.
 //   - Local path (e.g., /mnt/archive/) → LocalBackend
 //   - s3://bucket/prefix → S3Backend (AWS S3)
 //   - oss://region/bucket/prefix → S3Backend (Alibaba Cloud OSS)
 //   - cos://region/bucket/prefix → S3Backend (Tencent Cloud COS)
 //   - http(s)://host:port/bucket/prefix → S3Backend (MinIO)
-func NewFromPath(archivePath string) (*Archiver, error) {
+func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string) (*Archiver, error) {
 	var backend Backend
 	var err error
 
 	if isS3URL(archivePath) {
-		backend, err = NewS3Backend(archivePath)
+		backend, err = NewS3Backend(archivePath, accessKeyID, secretAccessKey)
 	} else {
 		backend, err = NewLocalBackend(archivePath)
 	}

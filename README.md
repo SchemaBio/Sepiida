@@ -43,6 +43,7 @@ MiniWDL使用 `-d uuid` 模式执行时，目录结构如下：
 - 收集stdout/stderr日志
 - 收集outputs.json结果文件
 - **增量推送**：只推送有变化的Workflow
+- **对象存储归档**：Workflow成功后自动归档输出文件到S3/MinIO/OSS/COS或本地目录
 
 ## 使用方法
 
@@ -123,8 +124,96 @@ key-003
 | `-id` | Agent ID | agent-001 |
 | `-i` | 推送间隔（秒） | 60 |
 | `-w` | 监控目录（UUID目录的父目录） | ./output |
+| `-archive` | 对象存储归档路径（见下方说明） | （不归档） |
+| `-archive-key-id` | 对象存储 Access Key ID（覆盖环境变量） | （读取环境变量） |
+| `-archive-key-secret` | 对象存储 Secret Access Key（覆盖环境变量） | （读取环境变量） |
 
-### 5. 查询结果
+### 5. 对象存储归档（可选）
+
+Agent 可以在 Workflow 成功完成后，自动将输出文件归档到对象存储或本地目录。通过 `-archive` 参数指定归档目标。
+
+**使用示例：**
+
+```bash
+# 归档到 AWS S3（通过参数指定凭据）
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive s3://my-bucket/prefix \
+    -archive-key-id AKIA... \
+    -archive-key-secret ...
+
+# 归档到 MinIO（通过参数指定凭据）
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive http://minio.local:9000/my-bucket/prefix \
+    -archive-key-id minioadmin \
+    -archive-key-secret minioadmin
+
+# 归档到阿里云 OSS
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive oss://cn-hangzhou/my-bucket/prefix \
+    -archive-key-id LTAI... \
+    -archive-key-secret ...
+
+# 归档到腾讯云 COS
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive cos://ap-guangzhou/my-bucket/prefix \
+    -archive-key-id AKID... \
+    -archive-key-secret ...
+
+# 也可以通过环境变量指定凭据（不使用 -archive-key-* 参数时自动读取）
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive s3://my-bucket/prefix
+
+# 归档到本地目录（无需凭据）
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive /mnt/archive/outputs
+```
+
+**支持的存储后端：**
+
+| URL格式 | 存储系统 | 示例 |
+|---------|---------|------|
+| `s3://bucket/prefix` | AWS S3 | `s3://sepiida-archive/results` |
+| `http://host:port/bucket/prefix` | MinIO (HTTP) | `http://minio.local:9000/results` |
+| `https://host:port/bucket/prefix` | MinIO (HTTPS) | `https://minio.example.com/results` |
+| `oss://region/bucket/prefix` | 阿里云 OSS | `oss://cn-hangzhou/my-bucket/results` |
+| `cos://region/bucket/prefix` | 腾讯云 COS | `cos://ap-guangzhou/my-bucket/results` |
+| 本地路径 | 本地文件系统 | `/mnt/archive/outputs` |
+
+**认证凭据：**
+
+优先使用 `-archive-key-id` / `-archive-key-secret` 参数，未指定时自动从环境变量读取：
+
+| 存储系统 | CLI 参数 | 环境变量（备选） |
+|---------|---------|---------|
+| AWS S3 / MinIO | `-archive-key-id` + `-archive-key-secret` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+| MinIO | 同上 | `MINIO_ROOT_USER` + `MINIO_ROOT_PASSWORD` |
+| 阿里云 OSS | 同上 | `ALIBABA_CLOUD_ACCESS_KEY_ID` + `ALIBABA_CLOUD_ACCESS_KEY_SECRET` |
+| 腾讯云 COS | 同上 | `TENCENT_CLOUD_SECRET_ID` + `TENCENT_CLOUD_SECRET_KEY` |
+
+**归档内容：**
+
+当 Workflow 状态变为 `success` 且尚未归档时，Agent 自动上传以下文件：
+
+| 文件 | 处理方式 | 存储 Key |
+|------|---------|----------|
+| `workflow.log` | 直接上传 | `{uuid}/workflow.log` |
+| `outputs.json` | 直接上传 | `{uuid}/outputs.json` |
+| `.txt` / `.csv` 文件 | 合并为一个 Parquet 文件 | `{uuid}/outputs.parquet` |
+| 其他文件（.bam, .vcf.gz 等） | 按原始路径逐个上传 | `{uuid}/{相对路径}` |
+
+> **Parquet 合并优化：** `outputs.json` 中引用的所有文本文件（`.txt`、`.csv`）会被合并为单个 Parquet 文件，每行包含 `file_path` 和 `content` 两列，减少小文件数量，提高存储和查询效率。
+
+**幂等性：** 每个 UUID 目录下的 `.sepiida.json` 状态文件会记录 `Archived` 标志，防止重复归档。
+
+### 6. 查询结果
 
 使用query-keys.txt中的Key查询：
 
@@ -228,6 +317,8 @@ CREATE INDEX idx_tasks_uuid ON tasks(uuid);
 
 - Go 1.21+
 - PostgreSQL（可选）- SQLite使用纯Go实现，无需C编译器
+- [minio-go](https://github.com/minio/minio-go) - S3兼容对象存储客户端（归档功能）
+- [parquet-go](https://github.com/parquet-go/parquet-go) - Parquet文件写入（文本文件合并）
 
 ## License
 

@@ -90,18 +90,24 @@ func parseCloudURL(u *url.URL, scheme string) (region, bucket, prefix string, er
 }
 
 // NewS3Backend creates an S3-compatible archive backend.
-// Credentials are read from environment variables:
+// If accessKeyID and secretAccessKey are non-empty, they are used directly.
+// Otherwise, credentials are read from environment variables:
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (AWS S3 / MinIO)
 //   - MINIO_ROOT_USER / MINIO_ROOT_PASSWORD (MinIO)
 //   - ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET (Alibaba Cloud OSS)
 //   - TENCENT_CLOUD_SECRET_ID / TENCENT_CLOUD_SECRET_KEY (Tencent Cloud COS)
-func NewS3Backend(rawURL string) (*S3Backend, error) {
+func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S3Backend, error) {
 	endpoint, bucket, prefix, useSSL, err := ParseS3URL(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	creds := credentials.NewEnvAWS()
+	var creds *credentials.Credentials
+	if accessKeyID != "" && secretAccessKey != "" {
+		creds = credentials.NewStatic(accessKeyID, secretAccessKey, "", credentials.SignatureDefault)
+	} else {
+		creds = credentials.NewEnvAWS()
+	}
 
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  creds,
