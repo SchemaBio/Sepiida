@@ -26,9 +26,10 @@ func NewArchiver(backend Backend) *Archiver {
 // storage instead of reading from environment variables.
 //   - Local path (e.g., /mnt/archive/) → LocalBackend
 //   - s3://bucket/prefix → S3Backend (AWS S3)
-//   - oss://region/bucket/prefix → S3Backend (Alibaba Cloud OSS)
-//   - cos://region/bucket/prefix → COSBackend (Tencent Cloud COS, short URL)
-//   - https://<bucket>.cos.<region>.myqcloud.com/prefix → COSBackend (Tencent Cloud COS, virtual-hosted)
+//   - oss://region/bucket/prefix → OSSBackend (Alibaba Cloud OSS)
+//   - https://<bucket>.oss-<region>.aliyuncs.com/prefix → OSSBackend (Alibaba Cloud OSS)
+//   - cos://region/bucket/prefix → COSBackend (Tencent Cloud COS)
+//   - https://<bucket>.cos.<region>.myqcloud.com/prefix → COSBackend (Tencent Cloud COS)
 //   - http(s)://host:port/bucket/prefix → S3Backend (MinIO)
 func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string) (*Archiver, error) {
 	var backend Backend
@@ -36,6 +37,8 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 
 	if isCOSURL(archivePath) {
 		backend, err = NewCOSBackend(archivePath, accessKeyID, secretAccessKey)
+	} else if isOSSURL(archivePath) {
+		backend, err = NewOSSBackend(archivePath, accessKeyID, secretAccessKey)
 	} else if isS3URL(archivePath) {
 		backend, err = NewS3Backend(archivePath, accessKeyID, secretAccessKey)
 	} else {
@@ -54,10 +57,6 @@ func isCOSURL(path string) bool {
 	if strings.HasPrefix(path, "cos://") {
 		return true
 	}
-	if strings.HasPrefix(path, "https://") && strings.Contains(path, ".cos.") && strings.HasSuffix(path, ".myqcloud.com") {
-		return true
-	}
-	// Also handle URLs with path component: https://bucket.cos.region.myqcloud.com/prefix
 	if strings.HasPrefix(path, "https://") {
 		host := strings.SplitN(strings.TrimPrefix(path, "https://"), "/", 2)[0]
 		if strings.Contains(host, ".cos.") && strings.HasSuffix(host, ".myqcloud.com") {
@@ -67,12 +66,32 @@ func isCOSURL(path string) bool {
 	return false
 }
 
-// isS3URL checks if the path refers to S3-compatible storage (excluding COS).
+// isOSSURL checks if the path refers to Alibaba Cloud OSS.
+func isOSSURL(path string) bool {
+	if strings.HasPrefix(path, "oss://") {
+		return true
+	}
+	if strings.HasPrefix(path, "https://") {
+		host := strings.SplitN(strings.TrimPrefix(path, "https://"), "/", 2)[0]
+		if strings.Contains(host, ".oss-") && strings.HasSuffix(host, ".aliyuncs.com") {
+			return true
+		}
+	}
+	return false
+}
+
+// isS3URL checks if the path refers to S3-compatible storage (excluding COS and OSS).
 func isS3URL(path string) bool {
-	return strings.HasPrefix(path, "s3://") ||
-		strings.HasPrefix(path, "oss://") ||
-		strings.HasPrefix(path, "http://") ||
-		strings.HasPrefix(path, "https://") && !isCOSURL(path)
+	if strings.HasPrefix(path, "s3://") {
+		return true
+	}
+	if strings.HasPrefix(path, "http://") {
+		return true
+	}
+	if strings.HasPrefix(path, "https://") && !isCOSURL(path) && !isOSSURL(path) {
+		return true
+	}
+	return false
 }
 
 // Archive archives a completed workflow's outputs.
