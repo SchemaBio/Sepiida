@@ -13,10 +13,12 @@ import (
 
 // S3Backend archives files to S3-compatible object storage.
 type S3Backend struct {
-	client *minio.Client
-	bucket string
-	prefix string
-	rawURL string // original URL used to create this backend
+	client   *minio.Client
+	bucket   string
+	prefix   string
+	endpoint string
+	useSSL   bool
+	dnsStyle bool // true for COS/S3 virtual-hosted (bucket in hostname)
 }
 
 // ParseS3URL parses an object storage URL into endpoint, bucket, prefix, and SSL flag.
@@ -152,24 +154,53 @@ func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S
 		creds = credentials.NewEnvAWS()
 	}
 
+	// Detect DNS-style (virtual-hosted): bucket is part of the hostname.
+	// COS and S3 always use this; HTTP URLs may or may not.
+	dnsStyle := strings.HasPrefix(rawURL, "cos://") || strings.HasPrefix(rawURL, "s3://") ||
+		(strings.Contains(endpoint, ".cos.") && strings.HasSuffix(endpoint, ".myqcloud.com"))
+
+	lookup := minio.BucketLookupPath
+	if dnsStyle {
+		lookup = minio.BucketLookupDNS
+	}
+
 	client, err := minio.New(endpoint, &minio.Options{
-		Creds:  creds,
-		Secure: useSSL,
+		Creds:       creds,
+		Secure:      useSSL,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
 
 	return &S3Backend{
-		client: client,
-		bucket: bucket,
-		prefix: prefix,
-		rawURL: strings.TrimSuffix(rawURL, "/"),
+		client:   client,
+		bucket:   bucket,
+		prefix:   prefix,
+		endpoint: endpoint,
+		useSSL:   useSSL,
+		dnsStyle: dnsStyle,
 	}, nil
 }
 
 func (b *S3Backend) BasePath() string {
-	return b.rawURL
+	scheme := "https"
+	if !b.useSSL {
+		scheme = "http"
+	}
+	if b.dnsStyle {
+		// Virtual-hosted: https://<bucket>.<endpoint>/<prefix>
+		host := b.bucket + "." + b.endpoint
+		if b.prefix != "" {
+			return scheme + "://" + host + "/" + b.prefix
+		}
+		return scheme + "://" + host
+	}
+	// Path-style: https://<endpoint>/<bucket>/<prefix>
+	if b.prefix != "" {
+		return scheme + "://" + b.endpoint + "/" + b.bucket + "/" + b.prefix
+	}
+	return scheme + "://" + b.endpoint + "/" + b.bucket
 }
 
 func (b *S3Backend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {
