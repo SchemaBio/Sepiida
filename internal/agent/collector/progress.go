@@ -119,8 +119,11 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 			}
 		}
 
-		// Read outputs.json if workflow is done (recursively resolve file references)
-		if workflow.Status == model.WorkflowStatusSuccess {
+		// Load previous state to check if outputs need resolving
+		prevState, _ := c.stateMgr.LoadState(uuidDir)
+
+		// Read outputs.json if workflow is done and outputs haven't been pushed yet
+		if workflow.Status == model.WorkflowStatusSuccess && (prevState == nil || !prevState.OutputsPushed) {
 			outputsFile := filepath.Join(executionDir, "outputs.json")
 			if resolved, err := resolveOutputsJSON(outputsFile); err == nil {
 				workflow.OutputsJSON = resolved

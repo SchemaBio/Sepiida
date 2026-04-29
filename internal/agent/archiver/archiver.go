@@ -27,14 +27,16 @@ func NewArchiver(backend Backend) *Archiver {
 //   - Local path (e.g., /mnt/archive/) → LocalBackend
 //   - s3://bucket/prefix → S3Backend (AWS S3)
 //   - oss://region/bucket/prefix → S3Backend (Alibaba Cloud OSS)
-//   - cos://region/bucket/prefix → S3Backend (Tencent Cloud COS, short URL)
-//   - https://<bucket>.cos.<region>.myqcloud.com/prefix → S3Backend (Tencent Cloud COS, virtual-hosted)
+//   - cos://region/bucket/prefix → COSBackend (Tencent Cloud COS, short URL)
+//   - https://<bucket>.cos.<region>.myqcloud.com/prefix → COSBackend (Tencent Cloud COS, virtual-hosted)
 //   - http(s)://host:port/bucket/prefix → S3Backend (MinIO)
 func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string) (*Archiver, error) {
 	var backend Backend
 	var err error
 
-	if isS3URL(archivePath) {
+	if isCOSURL(archivePath) {
+		backend, err = NewCOSBackend(archivePath, accessKeyID, secretAccessKey)
+	} else if isS3URL(archivePath) {
 		backend, err = NewS3Backend(archivePath, accessKeyID, secretAccessKey)
 	} else {
 		backend, err = NewLocalBackend(archivePath)
@@ -47,13 +49,30 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 	return NewArchiver(backend), nil
 }
 
-// isS3URL checks if the path refers to S3-compatible storage.
+// isCOSURL checks if the path refers to Tencent Cloud COS.
+func isCOSURL(path string) bool {
+	if strings.HasPrefix(path, "cos://") {
+		return true
+	}
+	if strings.HasPrefix(path, "https://") && strings.Contains(path, ".cos.") && strings.HasSuffix(path, ".myqcloud.com") {
+		return true
+	}
+	// Also handle URLs with path component: https://bucket.cos.region.myqcloud.com/prefix
+	if strings.HasPrefix(path, "https://") {
+		host := strings.SplitN(strings.TrimPrefix(path, "https://"), "/", 2)[0]
+		if strings.Contains(host, ".cos.") && strings.HasSuffix(host, ".myqcloud.com") {
+			return true
+		}
+	}
+	return false
+}
+
+// isS3URL checks if the path refers to S3-compatible storage (excluding COS).
 func isS3URL(path string) bool {
 	return strings.HasPrefix(path, "s3://") ||
 		strings.HasPrefix(path, "oss://") ||
-		strings.HasPrefix(path, "cos://") ||
 		strings.HasPrefix(path, "http://") ||
-		strings.HasPrefix(path, "https://")
+		strings.HasPrefix(path, "https://") && !isCOSURL(path)
 }
 
 // Archive archives a completed workflow's outputs.
@@ -89,31 +108,46 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 		archived++
 	}
 
-	// 4. Resolve outputs.json and archive real files
+	// 4. Resolve outputs.json (recursive tmp file resolution only, preserve original paths)
 	resolvedJSON, pathMap, err := resolveOutputs(outputsPath)
 	if err != nil {
 		log.Printf("Warning: failed to resolve outputs.json for %s: %v", uuid, err)
 		return archived, nil
 	}
 
-	var textFiles []string
-	for realPath := range pathMap {
-		if isTextFile(realPath) {
-			textFiles = append(textFiles, realPath)
-		}
+	log.Printf("Archive: resolved %d files for UUID %s, execDir=%s", len(pathMap), uuid, executionDir)
+
+	// Prepend UUID to all archive keys
+	for origPath, relKey := range pathMap {
+		pathMap[origPath] = uuid + "/" + relKey
 	}
 
-	// 5. Archive all files individually
-	for realPath := range pathMap {
-		archiveKey := pathMap[realPath]
+	for origPath, archiveKey := range pathMap {
+		log.Printf("Archive: pathMap[%s] -> %s", origPath, archiveKey)
+	}
+
+	// 5. Archive all files individually (resolve symlinks to get real file for reading)
+	for origPath, archiveKey := range pathMap {
+		realPath, err := filepath.EvalSymlinks(origPath)
+		if err != nil {
+			log.Printf("Warning: failed to resolve symlink %s: %v", origPath, err)
+			continue
+		}
+		log.Printf("Archive: uploading %s (real: %s) -> key=%s", origPath, realPath, archiveKey)
 		if err := a.archiveFileByKey(ctx, archiveKey, realPath); err != nil {
-			log.Printf("Warning: failed to archive %s for %s: %v", realPath, uuid, err)
+			log.Printf("Warning: failed to archive %s for %s: %v", origPath, uuid, err)
 			continue
 		}
 		archived++
 	}
 
 	// 6. Consolidate text files into a single Parquet file (in addition to individual uploads)
+	var textFiles []string
+	for origPath := range pathMap {
+		if isTextFile(origPath) {
+			textFiles = append(textFiles, origPath)
+		}
+	}
 	if len(textFiles) > 0 {
 		if err := a.archiveTextParquet(ctx, uuid, executionDir, textFiles); err != nil {
 			log.Printf("Warning: failed to archive text parquet for %s: %v", uuid, err)
@@ -165,9 +199,10 @@ func (a *Archiver) uploadRewrittenOutputs(ctx context.Context, uuid string, reso
 	return a.backend.Upload(ctx, key, bytes.NewReader(data), int64(len(data)))
 }
 
-// resolveOutputs reads outputs.json and recursively resolves file references
-// (tmp JSON files) and symlinks. Returns the resolved JSON structure and a map
-// from real file path → archive key (uuid/relPath, but uuid is added later).
+// resolveOutputs reads outputs.json and recursively resolves JSON file references
+// (tmp files). Symlinks are NOT resolved here — original paths are preserved so
+// that archive keys (relative to execDir) can be computed correctly.
+// Returns the resolved JSON structure and a map from original path → archive key.
 func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) {
 	data, err := os.ReadFile(outputsPath)
 	if err != nil {
@@ -179,10 +214,10 @@ func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) 
 		return nil, nil, err
 	}
 
-	// Recursive resolve: tmp files + symlinks
-	resolved := resolveValue(raw)
+	// Only resolve JSON tmp files, preserve original symlink paths
+	resolved := resolveJSONFiles(raw)
 
-	// Collect real file paths and compute archive keys
+	// Collect file paths and compute archive keys (using original paths)
 	pathMap := make(map[string]string)
 	execDir := filepath.Dir(outputsPath)
 	collectPaths(resolved, execDir, pathMap)
@@ -190,20 +225,21 @@ func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) 
 	return resolved, pathMap, nil
 }
 
-// resolveValue recursively resolves a JSON value: if a string is a file path
-// to a JSON file, read and parse it; if it's a symlink, resolve to real path.
-func resolveValue(v interface{}) interface{} {
+// resolveJSONFiles recursively resolves a JSON value: if a string is a file path
+// whose content is valid JSON, read and replace with the parsed content.
+// Does NOT resolve symlinks — original paths are preserved.
+func resolveJSONFiles(v interface{}) interface{} {
 	switch val := v.(type) {
 	case string:
-		return resolveFilePath(val)
+		return resolveJSONFile(val)
 	case map[string]interface{}:
 		for k, child := range val {
-			val[k] = resolveValue(child)
+			val[k] = resolveJSONFiles(child)
 		}
 		return val
 	case []interface{}:
 		for i, child := range val {
-			val[i] = resolveValue(child)
+			val[i] = resolveJSONFiles(child)
 		}
 		return val
 	default:
@@ -211,62 +247,59 @@ func resolveValue(v interface{}) interface{} {
 	}
 }
 
-// resolveFilePath resolves a single string value: symlinks first, then
-// recursively reads JSON file content.
-func resolveFilePath(s string) interface{} {
+// resolveJSONFile checks if a string is a path to a JSON file and resolves it.
+// Symlinks are resolved only to read the file content; the original path string
+// is returned if the file is not JSON.
+func resolveJSONFile(s string) interface{} {
 	if len(s) == 0 || s[0] != '/' || strings.Contains(s, "://") {
 		return s
 	}
 
-	// Resolve symlinks
+	// Need to resolve symlinks to check if the file exists and read it
 	realPath, err := filepath.EvalSymlinks(s)
 	if err != nil {
 		return s
 	}
-	realPath = filepath.Clean(realPath)
 
 	info, err := os.Stat(realPath)
 	if err != nil || info.IsDir() {
-		return realPath
+		return s
 	}
 
-	// Try reading as JSON
 	data, err := os.ReadFile(realPath)
 	if err != nil {
-		return realPath
+		return s
 	}
 
 	var parsed interface{}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return realPath
+		return s // Not JSON — return original path
 	}
 
 	// It's a JSON file — recursively resolve its contents
-	return resolveValue(parsed)
+	log.Printf("Resolved outputs reference: %s", s)
+	return resolveJSONFiles(parsed)
 }
 
-// collectPaths walks the resolved JSON and collects file paths that exist on disk,
-// computing their archive key as uuid-relative path from execDir.
+// collectPaths walks the resolved JSON and collects file paths that look like
+// absolute paths, computing their archive key as relative path from execDir.
+// The pathMap key is the original path (with symlinks), value is the archive key.
 func collectPaths(v interface{}, execDir string, pathMap map[string]string) {
 	switch val := v.(type) {
 	case string:
-		if len(val) > 0 && val[0] != '/' && !strings.Contains(val, "://") {
+		if len(val) == 0 || val[0] != '/' || strings.Contains(val, "://") {
 			return
 		}
-		realPath, err := filepath.EvalSymlinks(val)
-		if err != nil {
+		// Check that the file actually exists (possibly via symlink)
+		if _, err := os.Stat(val); err != nil {
 			return
 		}
-		info, err := os.Stat(realPath)
-		if err != nil || info.IsDir() {
-			return
-		}
-		// Compute key: use original path relative to execDir for the archive key
+		// Compute archive key: original path relative to execDir
 		relPath, err := filepath.Rel(execDir, val)
 		if err != nil {
 			relPath = filepath.Base(val)
 		}
-		pathMap[realPath] = filepath.ToSlash(relPath)
+		pathMap[val] = filepath.ToSlash(relPath)
 	case map[string]interface{}:
 		for _, child := range val {
 			collectPaths(child, execDir, pathMap)
@@ -279,20 +312,14 @@ func collectPaths(v interface{}, execDir string, pathMap map[string]string) {
 }
 
 // rewritePaths recursively rewrites file path strings in the JSON structure
-// to point to the archive location.
+// to point to the archive location. The pathMap uses original paths as keys.
 func rewritePaths(v interface{}, pathMap map[string]string, basePath string) interface{} {
 	switch val := v.(type) {
 	case string:
-		// Check if this string is a file we archived
-		if len(val) > 0 && val[0] != '/' && !strings.Contains(val, "://") {
+		if len(val) == 0 || val[0] != '/' || strings.Contains(val, "://") {
 			return val
 		}
-		realPath, err := filepath.EvalSymlinks(val)
-		if err != nil {
-			return val
-		}
-		realPath = filepath.Clean(realPath)
-		if key, ok := pathMap[realPath]; ok {
+		if key, ok := pathMap[val]; ok {
 			return basePath + "/" + key
 		}
 		return val

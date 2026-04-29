@@ -11,26 +11,22 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// S3Backend archives files to S3-compatible object storage.
+// S3Backend archives files to S3-compatible object storage (AWS S3, MinIO, OSS).
 type S3Backend struct {
 	client   *minio.Client
 	bucket   string
 	prefix   string
 	endpoint string
 	useSSL   bool
-	dnsStyle bool // true for COS/S3 virtual-hosted (bucket in hostname)
 }
 
-// ParseS3URL parses an object storage URL into endpoint, bucket, prefix, and SSL flag.
+// ParseS3URL parses an S3/MinIO/OSS URL into endpoint, bucket, prefix, and SSL flag.
 // Supported formats:
 //
-//	s3://bucket-name/prefix                                      → AWS S3
-//	http://host:port/bucket/prefix                               → path-style (MinIO etc.)
-//	https://host:port/bucket/prefix                              → path-style (MinIO etc.)
-//	oss://region/bucket-name/prefix                              → Alibaba Cloud OSS
-//	cos://region/bucket-name/prefix                              → Tencent Cloud COS (short URL)
-//	https://<BucketName-APPID>.cos.<Region>.myqcloud.com/prefix  → Tencent Cloud COS (virtual-hosted)
-//	https://cos.<Region>.myqcloud.com/<BucketName-APPID>/prefix  → Tencent Cloud COS (path-style)
+//	s3://bucket-name/prefix                 → AWS S3
+//	oss://region/bucket-name/prefix         → Alibaba Cloud OSS
+//	http://host:port/bucket/prefix          → path-style (MinIO etc.)
+//	https://host:port/bucket/prefix         → path-style (MinIO etc.)
 func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -52,15 +48,6 @@ func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, er
 		bucket = bkt
 		prefix = pre
 		useSSL = true
-	case "cos":
-		region, bkt, pre, err := parseCloudURL(u, "cos")
-		if err != nil {
-			return "", "", "", false, err
-		}
-		endpoint = "cos." + region + ".myqcloud.com"
-		bucket = bkt
-		prefix = pre
-		useSSL = true
 	case "http", "https":
 		endpoint, bucket, prefix, err = parseHTTPURL(u)
 		if err != nil {
@@ -68,31 +55,15 @@ func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, er
 		}
 		useSSL = u.Scheme == "https"
 	default:
-		return "", "", "", false, fmt.Errorf("unsupported URL scheme: %s (use s3://, oss://, cos://, http://, or https://)", u.Scheme)
+		return "", "", "", false, fmt.Errorf("unsupported URL scheme: %s (use s3://, oss://, http://, or https://)", u.Scheme)
 	}
 
 	prefix = strings.TrimSuffix(prefix, "/")
 	return endpoint, bucket, prefix, useSSL, nil
 }
 
-// parseHTTPURL parses http(s) URLs, auto-detecting Tencent Cloud COS virtual-hosted domains.
-//
-// COS virtual-hosted: https://<BucketName-APPID>.cos.<Region>.myqcloud.com/prefix
-//
-//	endpoint: cos.<Region>.myqcloud.com, bucket: <BucketName-APPID>, prefix: prefix
-//
-// Path-style (MinIO, COS, etc.): https://host:port/bucket/prefix
-//
-//	endpoint: host:port, bucket: bucket, prefix: prefix
+// parseHTTPURL parses http(s) URLs in path-style: https://host:port/bucket/prefix
 func parseHTTPURL(u *url.URL) (endpoint, bucket, prefix string, err error) {
-	host := u.Hostname()
-
-	// Detect COS virtual-hosted: <BucketName-APPID>.cos.<Region>.myqcloud.com
-	if strings.HasSuffix(host, ".myqcloud.com") && strings.Contains(host, ".cos.") {
-		return parseCOSVirtualHosted(u)
-	}
-
-	// Default: path-style — first path segment is the bucket
 	endpoint = u.Host
 	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
 	if len(parts) < 1 || parts[0] == "" {
@@ -105,22 +76,7 @@ func parseHTTPURL(u *url.URL) (endpoint, bucket, prefix string, err error) {
 	return endpoint, bucket, prefix, nil
 }
 
-// parseCOSVirtualHosted parses COS virtual-hosted URLs.
-// Format: https://<BucketName-APPID>.cos.<Region>.myqcloud.com[/prefix]
-func parseCOSVirtualHosted(u *url.URL) (endpoint, bucket, prefix string, err error) {
-	host := u.Hostname()
-	// host: mybucket-1250000000.cos.ap-guangzhou.myqcloud.com
-	parts := strings.SplitN(host, ".cos.", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", "", fmt.Errorf("invalid COS virtual-hosted domain: %s", host)
-	}
-	bucket = parts[0]            // mybucket-1250000000
-	endpoint = "cos." + parts[1] // cos.ap-guangzhou.myqcloud.com
-	prefix = strings.TrimPrefix(u.Path, "/")
-	return endpoint, bucket, prefix, nil
-}
-
-// parseCloudURL parses oss:// and cos:// URLs with format: scheme://region/bucket/prefix
+// parseCloudURL parses oss:// URLs with format: scheme://region/bucket/prefix
 func parseCloudURL(u *url.URL, scheme string) (region, bucket, prefix string, err error) {
 	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 3)
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
@@ -140,7 +96,6 @@ func parseCloudURL(u *url.URL, scheme string) (region, bucket, prefix string, er
 //   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (AWS S3 / MinIO)
 //   - MINIO_ROOT_USER / MINIO_ROOT_PASSWORD (MinIO)
 //   - ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET (Alibaba Cloud OSS)
-//   - TENCENT_CLOUD_SECRET_ID / TENCENT_CLOUD_SECRET_KEY (Tencent Cloud COS)
 func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S3Backend, error) {
 	endpoint, bucket, prefix, useSSL, err := ParseS3URL(rawURL)
 	if err != nil {
@@ -154,20 +109,9 @@ func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S
 		creds = credentials.NewEnvAWS()
 	}
 
-	// Detect DNS-style (virtual-hosted): bucket is part of the hostname.
-	// COS and S3 always use this; HTTP URLs may or may not.
-	dnsStyle := strings.HasPrefix(rawURL, "cos://") || strings.HasPrefix(rawURL, "s3://") ||
-		(strings.Contains(endpoint, ".cos.") && strings.HasSuffix(endpoint, ".myqcloud.com"))
-
-	lookup := minio.BucketLookupPath
-	if dnsStyle {
-		lookup = minio.BucketLookupDNS
-	}
-
 	client, err := minio.New(endpoint, &minio.Options{
-		Creds:       creds,
-		Secure:      useSSL,
-		BucketLookup: lookup,
+		Creds:  creds,
+		Secure: useSSL,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
@@ -179,7 +123,6 @@ func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S
 		prefix:   prefix,
 		endpoint: endpoint,
 		useSSL:   useSSL,
-		dnsStyle: dnsStyle,
 	}, nil
 }
 
@@ -188,15 +131,6 @@ func (b *S3Backend) BasePath() string {
 	if !b.useSSL {
 		scheme = "http"
 	}
-	if b.dnsStyle {
-		// Virtual-hosted: https://<bucket>.<endpoint>/<prefix>
-		host := b.bucket + "." + b.endpoint
-		if b.prefix != "" {
-			return scheme + "://" + host + "/" + b.prefix
-		}
-		return scheme + "://" + host
-	}
-	// Path-style: https://<endpoint>/<bucket>/<prefix>
 	if b.prefix != "" {
 		return scheme + "://" + b.endpoint + "/" + b.bucket + "/" + b.prefix
 	}
