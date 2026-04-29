@@ -125,26 +125,26 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 					log.Printf("Failed to send output for UUID %s: %v", uuid, err)
 				} else {
 					log.Printf("Successfully sent output for UUID %s", uuid)
-					// Mark outputs as pushed in state file (in UUID directory)
 					if err := collector.MarkOutputsPushed(result.UUIDDir); err != nil {
 						log.Printf("Failed to mark outputs pushed: %v", err)
 					}
+				}
+			}
+		}
 
-					// Archive if configured and not already archived
-					if arch != nil {
-						state, _ := collector.LoadState(result.UUIDDir)
-						if state != nil && !state.Archived {
-							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-							_, err := arch.Archive(ctx, uuid, result.ExecutionDir)
-							cancel()
-							if err != nil {
-								log.Printf("Failed to archive for UUID %s: %v", uuid, err)
-							} else {
-								if err := collector.MarkArchived(result.UUIDDir); err != nil {
-									log.Printf("Failed to mark archived: %v", err)
-								}
-							}
-						}
+		// Archive if configured — independent of server push
+		if arch != nil && result.Progress.Workflow.Status == "success" {
+			state, _ := collector.LoadState(result.UUIDDir)
+			if state != nil && !state.Archived {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				_, err := arch.Archive(ctx, uuid, result.ExecutionDir)
+				cancel()
+				if err != nil {
+					log.Printf("Failed to archive for UUID %s: %v", uuid, err)
+				} else {
+					log.Printf("Successfully archived for UUID %s", uuid)
+					if err := collector.MarkArchived(result.UUIDDir); err != nil {
+						log.Printf("Failed to mark archived: %v", err)
 					}
 				}
 			}
