@@ -156,10 +156,17 @@ Agent 可以在 Workflow 成功完成后，自动将输出文件归档到对象�
     -archive-key-id LTAI... \
     -archive-key-secret ...
 
-# 归档到腾讯云 COS
+# 归档到腾讯云 COS（虚拟托管域名）
 ./bin/sepiida-agent -s http://localhost:8080 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
-    -archive cos://ap-guangzhou/my-bucket/prefix \
+    -archive https://mybucket-1250000000.cos.ap-guangzhou.myqcloud.com/prefix \
+    -archive-key-id AKID... \
+    -archive-key-secret ...
+
+# 归档到腾讯云 COS（短URL格式，等价于上面）
+./bin/sepiida-agent -s http://localhost:8080 \
+    -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
+    -archive cos://ap-guangzhou/mybucket-1250000000/prefix \
     -archive-key-id AKID... \
     -archive-key-secret ...
 
@@ -184,7 +191,8 @@ export AWS_SECRET_ACCESS_KEY=...
 | `http://host:port/bucket/prefix` | MinIO (HTTP) | `http://minio.local:9000/results` |
 | `https://host:port/bucket/prefix` | MinIO (HTTPS) | `https://minio.example.com/results` |
 | `oss://region/bucket/prefix` | 阿里云 OSS | `oss://cn-hangzhou/my-bucket/results` |
-| `cos://region/bucket/prefix` | 腾讯云 COS | `cos://ap-guangzhou/my-bucket/results` |
+| `cos://region/bucket/prefix` | 腾讯云 COS（短URL） | `cos://ap-guangzhou/mybucket-1250000000/results` |
+| `https://<bucket>.cos.<region>.myqcloud.com/prefix` | 腾讯云 COS（虚拟托管） | `https://mybucket-1250000000.cos.ap-guangzhou.myqcloud.com/results` |
 | 本地路径 | 本地文件系统 | `/mnt/archive/outputs` |
 
 **认证凭据：**

@@ -27,7 +27,8 @@ func NewArchiver(backend Backend) *Archiver {
 //   - Local path (e.g., /mnt/archive/) → LocalBackend
 //   - s3://bucket/prefix → S3Backend (AWS S3)
 //   - oss://region/bucket/prefix → S3Backend (Alibaba Cloud OSS)
-//   - cos://region/bucket/prefix → S3Backend (Tencent Cloud COS)
+//   - cos://region/bucket/prefix → S3Backend (Tencent Cloud COS, short URL)
+//   - https://<bucket>.cos.<region>.myqcloud.com/prefix → S3Backend (Tencent Cloud COS, virtual-hosted)
 //   - http(s)://host:port/bucket/prefix → S3Backend (MinIO)
 func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string) (*Archiver, error) {
 	var backend Backend

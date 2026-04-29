@@ -21,11 +21,13 @@ type S3Backend struct {
 // ParseS3URL parses an object storage URL into endpoint, bucket, prefix, and SSL flag.
 // Supported formats:
 //
-//	s3://bucket-name/prefix                  → AWS S3
-//	http://host:port/bucket/prefix           → MinIO (HTTP)
-//	https://host:port/bucket/prefix          → MinIO (HTTPS)
-//	oss://region/bucket-name/prefix          → Alibaba Cloud OSS
-//	cos://region/bucket-name/prefix          → Tencent Cloud COS
+//	s3://bucket-name/prefix                                      → AWS S3
+//	http://host:port/bucket/prefix                               → path-style (MinIO etc.)
+//	https://host:port/bucket/prefix                              → path-style (MinIO etc.)
+//	oss://region/bucket-name/prefix                              → Alibaba Cloud OSS
+//	cos://region/bucket-name/prefix                              → Tencent Cloud COS (short URL)
+//	https://<BucketName-APPID>.cos.<Region>.myqcloud.com/prefix  → Tencent Cloud COS (virtual-hosted)
+//	https://cos.<Region>.myqcloud.com/<BucketName-APPID>/prefix  → Tencent Cloud COS (path-style)
 func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -57,14 +59,9 @@ func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, er
 		prefix = pre
 		useSSL = true
 	case "http", "https":
-		endpoint = u.Host
-		parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
-		if len(parts) < 1 || parts[0] == "" {
-			return "", "", "", false, fmt.Errorf("bucket name required in URL path")
-		}
-		bucket = parts[0]
-		if len(parts) > 1 {
-			prefix = parts[1]
+		endpoint, bucket, prefix, err = parseHTTPURL(u)
+		if err != nil {
+			return "", "", "", false, err
 		}
 		useSSL = u.Scheme == "https"
 	default:
@@ -73,6 +70,51 @@ func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, er
 
 	prefix = strings.TrimSuffix(prefix, "/")
 	return endpoint, bucket, prefix, useSSL, nil
+}
+
+// parseHTTPURL parses http(s) URLs, auto-detecting Tencent Cloud COS virtual-hosted domains.
+//
+// COS virtual-hosted: https://<BucketName-APPID>.cos.<Region>.myqcloud.com/prefix
+//
+//	endpoint: cos.<Region>.myqcloud.com, bucket: <BucketName-APPID>, prefix: prefix
+//
+// Path-style (MinIO, COS, etc.): https://host:port/bucket/prefix
+//
+//	endpoint: host:port, bucket: bucket, prefix: prefix
+func parseHTTPURL(u *url.URL) (endpoint, bucket, prefix string, err error) {
+	host := u.Hostname()
+
+	// Detect COS virtual-hosted: <BucketName-APPID>.cos.<Region>.myqcloud.com
+	if strings.HasSuffix(host, ".myqcloud.com") && strings.Contains(host, ".cos.") {
+		return parseCOSVirtualHosted(u)
+	}
+
+	// Default: path-style — first path segment is the bucket
+	endpoint = u.Host
+	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+	if len(parts) < 1 || parts[0] == "" {
+		return "", "", "", fmt.Errorf("bucket name required in URL path")
+	}
+	bucket = parts[0]
+	if len(parts) > 1 {
+		prefix = parts[1]
+	}
+	return endpoint, bucket, prefix, nil
+}
+
+// parseCOSVirtualHosted parses COS virtual-hosted URLs.
+// Format: https://<BucketName-APPID>.cos.<Region>.myqcloud.com[/prefix]
+func parseCOSVirtualHosted(u *url.URL) (endpoint, bucket, prefix string, err error) {
+	host := u.Hostname()
+	// host: mybucket-1250000000.cos.ap-guangzhou.myqcloud.com
+	parts := strings.SplitN(host, ".cos.", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", fmt.Errorf("invalid COS virtual-hosted domain: %s", host)
+	}
+	bucket = parts[0]            // mybucket-1250000000
+	endpoint = "cos." + parts[1] // cos.ap-guangzhou.myqcloud.com
+	prefix = strings.TrimPrefix(u.Path, "/")
+	return endpoint, bucket, prefix, nil
 }
 
 // parseCloudURL parses oss:// and cos:// URLs with format: scheme://region/bucket/prefix
