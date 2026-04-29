@@ -19,6 +19,7 @@ type WorkflowState struct {
 	WorkflowStatus  model.WorkflowStatus `json:"workflow_status"`
 	LastPushedAt    time.Time           `json:"last_pushed_at"`
 	OutputsPushed   bool                `json:"outputs_pushed"`
+	Archived        bool                `json:"archived"`
 	TaskStates      map[string]TaskState `json:"task_states"`
 	LogFileSize     int64               `json:"log_file_size"`
 	LogFileModTime  time.Time           `json:"log_file_mod_time"`
@@ -83,13 +84,13 @@ func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir
 	prevState, err := s.LoadState(uuidDir)
 	if err != nil || prevState == nil {
 		// No previous state, need to push
-		return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+		return true, s.newState(nil, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 
 	// Check if execution directory changed (new run started)
 	if prevState.ExecutionDir != executionDir {
 		// New execution, need to push
-		return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 
 	// Check if log file has been modified
@@ -97,18 +98,23 @@ func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir
 		if logFileInfo.Size() != prevState.LogFileSize ||
 			logFileInfo.ModTime() != prevState.LogFileModTime {
 			// Log file changed, need to push
-			return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+			return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 		}
 	}
 
 	// Check workflow status change
 	if workflow.Status != prevState.WorkflowStatus {
-		return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 
 	// Check if outputs.json needs to be pushed
 	if workflow.Status == model.WorkflowStatusSuccess && !prevState.OutputsPushed {
-		return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
+	}
+
+	// Check if outputs need to be archived
+	if workflow.Status == model.WorkflowStatusSuccess && !prevState.Archived {
+		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 
 	// Check task states
@@ -127,18 +133,18 @@ func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir
 
 	// Compare task counts
 	if len(currentTaskStates) != len(prevState.TaskStates) {
-		return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 
 	// Compare each task state
 	for jobName, currentState := range currentTaskStates {
 		prevTaskState, exists := prevState.TaskStates[jobName]
 		if !exists {
-			return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+			return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 		}
 		if currentState.Status != prevTaskState.Status ||
 			currentState.ExitCode != prevTaskState.ExitCode {
-			return true, s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+			return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 		}
 	}
 
@@ -156,6 +162,26 @@ func (s *StateManager) MarkOutputsPushed(uuidDir string) error {
 	state.OutputsPushed = true
 	state.LastPushedAt = time.Now()
 	return s.SaveState(uuidDir, state)
+}
+
+// MarkArchived marks that workflow outputs have been archived
+func (s *StateManager) MarkArchived(uuidDir string) error {
+	state, err := s.LoadState(uuidDir)
+	if err != nil || state == nil {
+		return err
+	}
+
+	state.Archived = true
+	return s.SaveState(uuidDir, state)
+}
+
+// newState creates a new workflow state, preserving the Archived flag from prevState if applicable
+func (s *StateManager) newState(prevState *WorkflowState, uuid string, executionDir string, workflow *model.Workflow, tasks []model.Task, logFileInfo os.FileInfo) *WorkflowState {
+	newState := s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
+	if prevState != nil {
+		newState.Archived = prevState.Archived
+	}
+	return newState
 }
 
 // createNewState creates a new workflow state from current data

@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"strings"
 	"time"
 
-	"github.com/SchemaBio/Sepiida/internal/agent/parser"
+	"github.com/SchemaBio/Sepiida/internal/agent/archiver"
 	"github.com/SchemaBio/Sepiida/internal/agent/collector"
+	"github.com/SchemaBio/Sepiida/internal/agent/parser"
 	"github.com/SchemaBio/Sepiida/internal/agent/sender"
 )
 
@@ -18,6 +20,7 @@ func main() {
 	agentID := flag.String("id", "agent-001", "agent identifier")
 	interval := flag.Int("i", 60, "poll interval in seconds")
 	watchDirs := flag.String("w", "", "watch directories (comma separated, should contain UUID directories)")
+	archivePath := flag.String("archive", "", "archive destination (local path, s3://, oss://, cos://, or http(s)://minio)")
 	flag.Parse()
 
 	// Parse watch directories
@@ -45,16 +48,28 @@ func main() {
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
 	httpSender := sender.NewHTTPSender(*serverURL, *apiKey)
 
+	// Create archiver if archive path is specified
+	var arch *archiver.Archiver
+	if *archivePath != "" {
+		var err error
+		arch, err = archiver.NewFromPath(*archivePath)
+		if err != nil {
+			log.Fatalf("Failed to initialize archiver: %v", err)
+		}
+		defer arch.Close()
+		log.Printf("Archive destination: %s", *archivePath)
+	}
+
 	// Start polling loop
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	// Run first collection immediately
-	runCollection(progressCollector, httpSender)
+	runCollection(progressCollector, httpSender, arch)
 
 	// Then run on interval
 	for range ticker.C {
-		runCollection(progressCollector, httpSender)
+		runCollection(progressCollector, httpSender, arch)
 	}
 }
 
@@ -74,7 +89,7 @@ func parseWatchDirs(dirStr string) []string {
 	return dirs
 }
 
-func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender) {
+func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver) {
 	log.Println("Collecting workflow progress...")
 
 	results, err := collector.Collect()
@@ -113,6 +128,23 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 					// Mark outputs as pushed in state file (in UUID directory)
 					if err := collector.MarkOutputsPushed(result.UUIDDir); err != nil {
 						log.Printf("Failed to mark outputs pushed: %v", err)
+					}
+
+					// Archive if configured and not already archived
+					if arch != nil {
+						state, _ := collector.LoadState(result.UUIDDir)
+						if state != nil && !state.Archived {
+							ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+							_, err := arch.Archive(ctx, uuid, result.ExecutionDir)
+							cancel()
+							if err != nil {
+								log.Printf("Failed to archive for UUID %s: %v", uuid, err)
+							} else {
+								if err := collector.MarkArchived(result.UUIDDir); err != nil {
+									log.Printf("Failed to mark archived: %v", err)
+								}
+							}
+						}
 					}
 				}
 			}

@@ -193,6 +193,16 @@ func (c *ProgressCollector) MarkOutputsPushed(uuidDir string) error {
 	return c.stateMgr.MarkOutputsPushed(uuidDir)
 }
 
+// LoadState loads the workflow state for a UUID directory.
+func (c *ProgressCollector) LoadState(uuidDir string) (*state.WorkflowState, error) {
+	return c.stateMgr.LoadState(uuidDir)
+}
+
+// MarkArchived marks that the workflow has been archived.
+func (c *ProgressCollector) MarkArchived(uuidDir string) error {
+	return c.stateMgr.MarkArchived(uuidDir)
+}
+
 // readTaskLogs reads stdout and stderr from task directory
 func readTaskLogs(dir string) (string, string) {
 	var stdout, stderr string
