@@ -55,6 +55,10 @@ func (b *LocalBackend) Upload(ctx context.Context, key string, reader io.Reader,
 	return nil
 }
 
+func (b *LocalBackend) BasePath() string {
+	return b.rootPath
+}
+
 func (b *LocalBackend) Close() error {
 	return nil
 }

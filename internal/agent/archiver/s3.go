@@ -16,6 +16,7 @@ type S3Backend struct {
 	client *minio.Client
 	bucket string
 	prefix string
+	rawURL string // original URL used to create this backend
 }
 
 // ParseS3URL parses an object storage URL into endpoint, bucket, prefix, and SSL flag.
@@ -163,7 +164,12 @@ func NewS3Backend(rawURL string, accessKeyID string, secretAccessKey string) (*S
 		client: client,
 		bucket: bucket,
 		prefix: prefix,
+		rawURL: strings.TrimSuffix(rawURL, "/"),
 	}, nil
+}
+
+func (b *S3Backend) BasePath() string {
+	return b.rawURL
 }
 
 func (b *S3Backend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {

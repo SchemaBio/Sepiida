@@ -1,9 +1,12 @@
 package collector
 
 import (
+	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
 	"github.com/SchemaBio/Sepiida/internal/agent/state"
@@ -116,11 +119,11 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 			}
 		}
 
-		// Read outputs.json if workflow is done
+		// Read outputs.json if workflow is done (recursively resolve file references)
 		if workflow.Status == model.WorkflowStatusSuccess {
 			outputsFile := filepath.Join(executionDir, "outputs.json")
-			if data, err := os.ReadFile(outputsFile); err == nil {
-				workflow.OutputsJSON = string(data)
+			if resolved, err := resolveOutputsJSON(outputsFile); err == nil {
+				workflow.OutputsJSON = resolved
 			}
 		}
 
@@ -218,4 +221,122 @@ func readTaskLogs(dir string) (string, string) {
 	}
 
 	return stdout, stderr
+}
+
+// resolveOutputsJSON reads outputs.json and recursively resolves file path values.
+// If a value is an absolute path to an existing file whose content is valid JSON,
+// the value is replaced with the parsed JSON content. This handles the case where
+// outputs.json points to a tmp file that contains the actual output manifest.
+func resolveOutputsJSON(outputsPath string) (string, error) {
+	data, err := os.ReadFile(outputsPath)
+	if err != nil {
+		return "", err
+	}
+
+	resolved, changed := resolveJSONValues(data)
+	if !changed {
+		return string(data), nil
+	}
+
+	// Marshal back to get a clean JSON string
+	out, err := json.Marshal(resolved)
+	if err != nil {
+		return string(data), nil
+	}
+	return string(out), nil
+}
+
+// resolveJSONValues walks a parsed JSON structure and replaces any string value
+// that is a file path pointing to a JSON file with the parsed content of that file.
+// Returns the resolved value and whether any substitution was made.
+func resolveJSONValues(data []byte) (interface{}, bool) {
+	var raw interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, false
+	}
+
+	return resolveValue(raw)
+}
+
+// resolveValue recursively resolves a JSON value.
+func resolveValue(v interface{}) (interface{}, bool) {
+	switch val := v.(type) {
+	case string:
+		return resolveString(val)
+	case map[string]interface{}:
+		changed := false
+		for k, child := range val {
+			resolved, childChanged := resolveValue(child)
+			if childChanged {
+				val[k] = resolved
+				changed = true
+			}
+		}
+		return val, changed
+	case []interface{}:
+		changed := false
+		for i, child := range val {
+			resolved, childChanged := resolveValue(child)
+			if childChanged {
+				val[i] = resolved
+				changed = true
+			}
+		}
+		return val, changed
+	default:
+		return v, false
+	}
+}
+
+// resolveString checks if a string is a file path and resolves it.
+// For all file paths: symlinks are resolved to real paths.
+// For JSON files: content is parsed and recursively resolved.
+func resolveString(s string) (interface{}, bool) {
+	if len(s) == 0 || s[0] != '/' {
+		return s, false
+	}
+	if strings.Contains(s, "://") {
+		return s, false
+	}
+
+	// Resolve symlinks to real path
+	realPath, err := filepath.EvalSymlinks(s)
+	if err != nil {
+		return s, false
+	}
+	realPath = filepath.Clean(realPath)
+
+	info, err := os.Stat(realPath)
+	if err != nil || info.IsDir() {
+		// Path resolved but not a file — return resolved path if it changed
+		if realPath != filepath.Clean(s) {
+			return realPath, true
+		}
+		return s, false
+	}
+
+	// Try reading as JSON for recursive resolution
+	data, err := os.ReadFile(realPath)
+	if err != nil {
+		// Can't read, but still return resolved path if symlink changed
+		if realPath != filepath.Clean(s) {
+			return realPath, true
+		}
+		return s, false
+	}
+
+	var parsed interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		// Not JSON — return resolved path if symlink changed
+		if realPath != filepath.Clean(s) {
+			log.Printf("Resolved symlink: %s -> %s", s, realPath)
+			return realPath, true
+		}
+		return s, false
+	}
+
+	// JSON file — recursively resolve its contents
+	resolved, _ := resolveValue(parsed)
+	log.Printf("Resolved outputs reference: %s -> %s", s, realPath)
+	return resolved, true
 }
