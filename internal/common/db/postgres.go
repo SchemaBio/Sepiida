@@ -18,7 +18,7 @@ type PostgreSQL struct {
 // NewPostgreSQL creates a new PostgreSQL database instance
 func NewPostgreSQL(cfg Config) (*PostgreSQL, error) {
 	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		cfg.PostgresHost, cfg.PostgresPort, cfg.PostgresUser, cfg.PostgresPassword, cfg.PostgresDatabase)
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database)
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
@@ -41,13 +41,13 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 			uuid TEXT NOT NULL,
 			name TEXT NOT NULL,
 			status TEXT NOT NULL,
-			start_time TIMESTAMP,
-			end_time TIMESTAMP,
+			start_time TIMESTAMPTZ,
+			end_time TIMESTAMPTZ,
 			output_dir TEXT,
-			outputs_json TEXT,
+			outputs_json JSONB,
 			agent_id TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_workflows_uuid ON workflows(uuid)`,
 		`CREATE TABLE IF NOT EXISTS tasks (
@@ -57,14 +57,14 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 			name TEXT NOT NULL,
 			job_name TEXT NOT NULL,
 			status TEXT NOT NULL,
-			start_time TIMESTAMP,
-			end_time TIMESTAMP,
-			exit_code INTEGER,
+			start_time TIMESTAMPTZ,
+			end_time TIMESTAMPTZ,
+			exit_code SMALLINT,
 			output_dir TEXT,
 			stdout TEXT,
 			stderr TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (workflow_id) REFERENCES workflows(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_uuid ON tasks(uuid)`,

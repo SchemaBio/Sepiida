@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -20,7 +19,7 @@ import (
 func main() {
 	// Command line flags
 	port := flag.String("p", "8080", "server listen port")
-	database := flag.String("d", "sqlite://data/sepiida.db", "database connection string (sqlite://path or postgres://host:port/db?user=xxx&password=xxx)")
+	database := flag.String("d", "postgres://localhost:5432/sepiida?user=postgres&password=postgres", "database connection string (postgres://host:port/db?user=xxx&password=xxx)")
 	agentKeyFile := flag.String("agent-key", "", "path to agent key file (keys for pushing data)")
 	queryKeyFile := flag.String("query-key", "", "path to query key file (keys for querying results)")
 	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
@@ -57,10 +56,10 @@ func main() {
 	}
 
 	// Parse database connection
-	dbType, dbConn := parseDatabaseConn(*database)
+	cfg := parsePostgresConn(*database)
 
 	// Initialize database
-	databaseObj, err := initDatabase(dbType, dbConn)
+	databaseObj, err := db.NewPostgreSQL(cfg)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -137,32 +136,10 @@ func main() {
 	}
 }
 
-func parseDatabaseConn(conn string) (string, string) {
-	if strings.HasPrefix(conn, "sqlite://") {
-		return "sqlite", strings.TrimPrefix(conn, "sqlite://")
-	}
-	if strings.HasPrefix(conn, "postgres://") {
-		return "postgres", strings.TrimPrefix(conn, "postgres://")
-	}
-	return "sqlite", conn
-}
+func parsePostgresConn(conn string) db.Config {
+	// Strip postgres:// prefix
+	conn = strings.TrimPrefix(conn, "postgres://")
 
-func initDatabase(dbType, dbConn string) (db.Database, error) {
-	switch dbType {
-	case "sqlite":
-		dir := strings.TrimSuffix(dbConn, "/"+strings.Split(dbConn, "/")[len(strings.Split(dbConn, "/"))-1])
-		if dir != "" && dir != dbConn {
-			os.MkdirAll(dir, 0755)
-		}
-		return db.NewSQLite(dbConn)
-	case "postgres":
-		return parsePostgresConn(dbConn)
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", dbType)
-	}
-}
-
-func parsePostgresConn(conn string) (db.Database, error) {
 	parts := strings.SplitN(conn, "?", 2)
 	hostPortDb := parts[0]
 	params := ""
@@ -201,14 +178,11 @@ func parsePostgresConn(conn string) (db.Database, error) {
 		}
 	}
 
-	cfg := db.Config{
-		Type:            "postgres",
-		PostgresHost:     host,
-		PostgresPort:     port,
-		PostgresUser:     user,
-		PostgresPassword: password,
-		PostgresDatabase: databaseName,
+	return db.Config{
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: databaseName,
 	}
-
-	return db.NewPostgreSQL(cfg)
 }

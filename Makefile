@@ -31,7 +31,7 @@ deps:
 
 # Run server locally (example)
 run-server:
-	go run ./cmd/server -p 8080 -d sqlite://data/sepiida.db -key test-key
+	go run ./cmd/server -p 8080 -d "postgres://localhost:5432/sepiida?user=postgres&password=postgres" -agent-key agent-keys.txt -query-key query-keys.txt
 
 # Run agent locally (example)
 run-agent:

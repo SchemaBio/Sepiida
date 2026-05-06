@@ -29,17 +29,11 @@ type Database interface {
 	GetTasksByWorkflow(ctx context.Context, workflowID string) ([]*model.Task, error)
 }
 
-// Config represents database configuration
+// Config represents PostgreSQL database configuration
 type Config struct {
-	Type string // "sqlite" or "postgres"
-
-	// SQLite config
-	SQLitePath string
-
-	// PostgreSQL config
-	PostgresHost     string
-	PostgresPort     int
-	PostgresUser     string
-	PostgresPassword string
-	PostgresDatabase string
+	Host     string
+	Port     int
+	User     string
+	Password string
+	Database string
 }

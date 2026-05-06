@@ -29,7 +29,7 @@ MiniWDL使用 `-d uuid` 模式执行时，目录结构如下：
 
 ### Server端
 - 接收Agent推送的MiniWDL分析进度
-- 支持SQLite和PostgreSQL数据库
+- 使用PostgreSQL数据库
 - **双重Key管理**：
   - Agent Key：用于Agent推送数据
   - Query Key：用于查询结果
@@ -80,18 +80,14 @@ key-003
 ### 3. 启动Server
 
 ```bash
-# SQLite
-./bin/sepiida-server -p 8080 -d sqlite://data/sepiida.db \
-    -agent-key agent-keys.txt \
-    -query-key query-keys.txt
-
-# PostgreSQL
-./bin/sepiida-server -p 8080 -d postgres://localhost:5432/sepiida?user=postgres&password=xxx \
+./bin/sepiida-server -p 8080 \
+    -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
     -agent-key agent-keys.txt \
     -query-key query-keys.txt
 
 # 自定义刷新间隔（默认30秒）
-./bin/sepiida-server -p 8080 -d sqlite://data/sepiida.db \
+./bin/sepiida-server -p 8080 \
+    -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
     -agent-key agent-keys.txt \
     -query-key query-keys.txt \
     -key-refresh 60
@@ -101,7 +97,7 @@ key-003
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-p` | 监听端口 | 8080 |
-| `-d` | 数据库连接字符串 | sqlite://data/sepiida.db |
+| `-d` | 数据库连接字符串 | postgres://localhost:5432/sepiida?user=postgres&password=postgres |
 | `-agent-key` | Agent Key文件路径 | **必填** |
 | `-query-key` | Query Key文件路径 | **必填** |
 | `-key-refresh` | Key文件刷新间隔（秒） | 30 |
@@ -299,13 +295,13 @@ CREATE TABLE workflows (
     uuid TEXT NOT NULL,
     name TEXT NOT NULL,
     status TEXT NOT NULL,
-    start_time TIMESTAMP,
-    end_time TIMESTAMP,
+    start_time TIMESTAMPTZ,
+    end_time TIMESTAMPTZ,
     output_dir TEXT,
-    outputs_json TEXT,
+    outputs_json JSONB,
     agent_id TEXT,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
 );
 CREATE INDEX idx_workflows_uuid ON workflows(uuid);
 
@@ -324,7 +320,7 @@ CREATE INDEX idx_tasks_uuid ON tasks(uuid);
 ## 依赖
 
 - Go 1.21+
-- PostgreSQL（可选）- SQLite使用纯Go实现，无需C编译器
+- PostgreSQL
 - [minio-go](https://github.com/minio/minio-go) - S3兼容对象存储客户端（归档功能）
 - [parquet-go](https://github.com/parquet-go/parquet-go) - Parquet文件写入（文本文件合并）
 
