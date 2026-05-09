@@ -97,9 +97,10 @@ func isS3URL(path string) bool {
 // Archive archives a completed workflow's outputs.
 // It archives inputs.json, workflow.log, and outputs.json as-is,
 // then resolves outputs.json (recursive file references + symlinks) to find
-// real output files. Text files (.txt, .csv) are consolidated into a Parquet
-// file; other files are archived individually. Finally, a rewritten outputs.json
-// with paths pointing to the archive location is uploaded.
+// real output files. Text files (.txt, .csv, .tsv) are converted to individual Parquet
+// files with dynamic schema based on header row; other files are archived individually
+// with flattened names (basename only). Finally, a rewritten outputs.json with paths
+// pointing to the archive location is uploaded.
 func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string) (int, error) {
 	archived := 0
 
@@ -136,6 +137,25 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 
 	log.Printf("Archive: resolved %d files for UUID %s, execDir=%s", len(pathMap), uuid, executionDir)
 
+	// Collect text files (before modifying pathMap)
+	var textFiles []string
+	for origPath := range pathMap {
+		if isTextFile(origPath) {
+			textFiles = append(textFiles, origPath)
+		}
+	}
+
+	// Update pathMap: convert text file paths to .parquet extensions
+	// This ensures outputs.resolved.json references .parquet files instead of .txt
+	for origPath, archiveKey := range pathMap {
+		if isTextFile(origPath) {
+			// Replace extension with .parquet
+			ext := filepath.Ext(archiveKey)
+			base := strings.TrimSuffix(archiveKey, ext)
+			pathMap[origPath] = base + ".parquet"
+		}
+	}
+
 	// Prepend UUID to all archive keys
 	for origPath, relKey := range pathMap {
 		pathMap[origPath] = uuid + "/" + relKey
@@ -145,8 +165,14 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 		log.Printf("Archive: pathMap[%s] -> %s", origPath, archiveKey)
 	}
 
-	// 5. Archive all files individually (resolve symlinks to get real file for reading)
+	// 5. Archive non-text files individually (resolve symlinks to get real file for reading)
+	// Text files will be converted to Parquet instead
 	for origPath, archiveKey := range pathMap {
+		// Skip text files - they will be converted to parquet
+		if isTextFile(origPath) {
+			continue
+		}
+
 		realPath, err := filepath.EvalSymlinks(origPath)
 		if err != nil {
 			log.Printf("Warning: failed to resolve symlink %s: %v", origPath, err)
@@ -160,20 +186,15 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 		archived++
 	}
 
-	// 6. Consolidate text files into a single Parquet file (in addition to individual uploads)
-	var textFiles []string
-	for origPath := range pathMap {
-		if isTextFile(origPath) {
-			textFiles = append(textFiles, origPath)
+	// 6. Convert each text file to individual Parquet file with dynamic schema
+	for _, textFile := range textFiles {
+		parquetKey := pathMap[textFile]
+		if err := a.archiveSingleParquet(ctx, textFile, parquetKey); err != nil {
+			log.Printf("Warning: failed to archive parquet for %s: %v", textFile, err)
+			continue
 		}
-	}
-	if len(textFiles) > 0 {
-		if err := a.archiveTextParquet(ctx, uuid, executionDir, textFiles); err != nil {
-			log.Printf("Warning: failed to archive text parquet for %s: %v", uuid, err)
-		} else {
-			archived++
-			log.Printf("Consolidated %d text files into parquet for UUID %s", len(textFiles), uuid)
-		}
+		archived++
+		log.Printf("Converted %s to parquet -> key=%s", filepath.Base(textFile), parquetKey)
 	}
 
 	// 7. Upload rewritten outputs.json with archive paths
@@ -236,10 +257,10 @@ func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) 
 	// Only resolve JSON tmp files, preserve original symlink paths
 	resolved := resolveJSONFiles(raw)
 
-	// Collect file paths and compute archive keys (using original paths)
+	// Collect file paths and compute flattened archive keys (basename only)
 	pathMap := make(map[string]string)
 	execDir := filepath.Dir(outputsPath)
-	collectPaths(resolved, execDir, pathMap)
+	collectPathsFlat(resolved, execDir, pathMap)
 
 	return resolved, pathMap, nil
 }
@@ -300,10 +321,34 @@ func resolveJSONFile(s string) interface{} {
 	return resolveJSONFiles(parsed)
 }
 
-// collectPaths walks the resolved JSON and collects file paths that look like
-// absolute paths, computing their archive key as relative path from execDir.
-// The pathMap key is the original path (with symlinks), value is the archive key.
-func collectPaths(v interface{}, execDir string, pathMap map[string]string) {
+// collectPathsFlat collects all file paths from the resolved JSON structure,
+// then generates flattened archive keys (using basename only) with conflict resolution.
+// Text files (txt/csv/tsv) are included in pathMap but will not be uploaded individually.
+func collectPathsFlat(v interface{}, execDir string, pathMap map[string]string) {
+	// Step 1: Collect all valid file paths
+	var allPaths []string
+	collectAllPaths(v, &allPaths)
+
+	// Step 2: Generate flattened archive keys with conflict resolution
+	usedKeys := make(map[string]int)
+	for _, path := range allPaths {
+		filename := filepath.Base(path)
+		archiveKey := filename
+
+		// Handle filename conflicts by adding sequence number
+		if count, exists := usedKeys[archiveKey]; exists {
+			ext := filepath.Ext(archiveKey)
+			base := strings.TrimSuffix(archiveKey, ext)
+			archiveKey = fmt.Sprintf("%s_%d%s", base, count+1, ext)
+		}
+		usedKeys[archiveKey]++
+
+		pathMap[path] = archiveKey
+	}
+}
+
+// collectAllPaths recursively collects all valid file paths from the JSON structure.
+func collectAllPaths(v interface{}, paths *[]string) {
 	switch val := v.(type) {
 	case string:
 		if len(val) == 0 || val[0] != '/' || strings.Contains(val, "://") {
@@ -313,19 +358,14 @@ func collectPaths(v interface{}, execDir string, pathMap map[string]string) {
 		if _, err := os.Stat(val); err != nil {
 			return
 		}
-		// Compute archive key: original path relative to execDir
-		relPath, err := filepath.Rel(execDir, val)
-		if err != nil {
-			relPath = filepath.Base(val)
-		}
-		pathMap[val] = filepath.ToSlash(relPath)
+		*paths = append(*paths, val)
 	case map[string]interface{}:
 		for _, child := range val {
-			collectPaths(child, execDir, pathMap)
+			collectAllPaths(child, paths)
 		}
 	case []interface{}:
 		for _, child := range val {
-			collectPaths(child, execDir, pathMap)
+			collectAllPaths(child, paths)
 		}
 	}
 }
@@ -357,15 +397,16 @@ func rewritePaths(v interface{}, pathMap map[string]string, basePath string) int
 	}
 }
 
-// archiveTextParquet builds a Parquet file from text files and uploads it.
-func (a *Archiver) archiveTextParquet(ctx context.Context, uuid string, executionDir string, textFiles []string) error {
-	data, err := buildParquetData(executionDir, textFiles)
+// archiveSingleParquet converts a single text file to Parquet and uploads it.
+// The Parquet schema is dynamically generated from the file's header row.
+func (a *Archiver) archiveSingleParquet(ctx context.Context, textFilePath string, parquetKey string) error {
+	parquetData, columns, err := buildSingleFileParquet(textFilePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to build parquet: %w", err)
 	}
 
-	key := uuid + "/outputs.parquet"
-	return a.backend.Upload(ctx, key, bytes.NewReader(data), int64(len(data)))
+	log.Printf("Parquet schema for %s: columns=%v", filepath.Base(textFilePath), columns)
+	return a.backend.Upload(ctx, parquetKey, bytes.NewReader(parquetData), int64(len(parquetData)))
 }
 
 // archiveFile uploads a single file, preserving its path relative to executionDir.

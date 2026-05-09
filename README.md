@@ -210,10 +210,13 @@ export AWS_SECRET_ACCESS_KEY=...
 |------|---------|----------|
 | `workflow.log` | 直接上传 | `{uuid}/workflow.log` |
 | `outputs.json` | 直接上传 | `{uuid}/outputs.json` |
-| `.txt` / `.csv` 文件 | 合并为一个 Parquet 文件 | `{uuid}/outputs.parquet` |
-| 其他文件（.bam, .vcf.gz 等） | 按原始路径逐个上传 | `{uuid}/{相对路径}` |
+| `inputs.json` | 直接上传 | `{uuid}/inputs.json` |
+| `.txt` / `.csv` / `.tsv` 文件 | 转换为独立 Parquet 文件 | `{uuid}/{文件名}.parquet` |
+| 其他文件（.bam, .bai, .vcf.gz 等） | 扁平化上传（仅文件名） | `{uuid}/{文件名}` |
 
-> **Parquet 合并优化：** `outputs.json` 中引用的所有文本文件（`.txt`、`.csv`）会被合并为单个 Parquet 文件，每行包含 `file_path` 和 `content` 两列，减少小文件数量，提高存储和查询效率。
+> **扁平化归档：** `outputs.json` 中引用的所有文件均使用扁平化命名，仅保留文件名（basename），不再保持原有目录结构。如有同名文件，自动添加序号（如 `result.bam`、`result_2.bam`）。
+
+> **Parquet 动态 Schema：** 每个文本文件（`.txt`、`.csv`、`.tsv`）独立转换为 Parquet 文件。第一行作为标题行，列名成为 Parquet 的字段名，后续每行数据作为独立记录存储。例如 `cnv.txt` 内容为 `gene,type,value` 三列，转换后 `{uuid}/cnv.parquet` 拥有对应的 `gene`、`type`、`value` 三列，可直接按列查询。`outputs.resolved.json` 中的路径也会更新为 `.parquet` 扩展名。
 
 **幂等性：** 每个 UUID 目录下的 `.sepiida.json` 状态文件会记录 `Archived` 标志，防止重复归档。
 
