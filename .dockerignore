@@ -1,0 +1,11 @@
+bin/
+*.exe
+*.test
+.idea/
+.vscode/
+.git/
+Dockerfile*
+docker-compose*
+README.md
+docs/
+Makefile
