@@ -1,0 +1,37 @@
+version: "3.8"
+
+# =============================================================================
+# Sepiida — Server only (no agent, no Postgres)
+#
+# Before starting:
+#   1. Copy agent-keys.example -> agent-keys.txt and set real keys
+#   2. Copy query-keys.example -> query-keys.txt and set real keys
+#   3. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
+#
+# Usage:
+#   docker compose -f docker-compose.server.yml build
+#   docker compose -f docker-compose.server.yml up -d
+# =============================================================================
+
+services:
+  # ── Sepiida Server ────────────────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    command:
+      - "-p=9090"
+      - "-d=${DATABASE_URL}"
+      - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
+      - "-query-key=/etc/sepiida/keys/query-keys.txt"
+      - "-key-refresh=30"
+    ports:
+      - "${SERVER_PORT:-9090}:9090"
+    volumes:
+      - ./agent-keys.txt:/etc/sepiida/keys/agent-keys.txt:ro
+      - ./query-keys.txt:/etc/sepiida/keys/query-keys.txt:ro
+
+networks:
+  default:
+    driver: bridge

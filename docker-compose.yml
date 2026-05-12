@@ -1,0 +1,64 @@
+version: "3.8"
+
+# =============================================================================
+# Sepiida — Server + Agent on the same host
+#
+# Before starting:
+#   1. Copy agent-keys.example -> agent-keys.txt and set real keys
+#   2. Copy query-keys.example -> query-keys.txt and set real keys
+#   3. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
+#   4. Create ./output dir or change SEPIIDA_WATCH_DIRS below
+#
+# Usage:
+#   docker compose build
+#   docker compose up -d
+# =============================================================================
+
+services:
+  # ── Sepiida Server ────────────────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    command:
+      - "-p=9090"
+      - "-d=${DATABASE_URL}"
+      - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
+      - "-query-key=/etc/sepiida/keys/query-keys.txt"
+      - "-key-refresh=30"
+    ports:
+      - "${SERVER_PORT:-9090}:9090"
+    volumes:
+      - ./agent-keys.txt:/etc/sepiida/keys/agent-keys.txt:ro
+      - ./query-keys.txt:/etc/sepiida/keys/query-keys.txt:ro
+    networks:
+      - sepiida
+
+  # ── Sepiida Agent ─────────────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    restart: unless-stopped
+    command:
+      - "-s=http://server:9090"
+      - "-key=${SEPIIDA_AGENT_KEY:-agent-key-001}"
+      - "-id=${SEPIIDA_AGENT_ID:-agent-001}"
+      - "-i=${SEPIIDA_AGENT_INTERVAL:-60}"
+      - "-w=${SEPIIDA_WATCH_DIRS:-/data/output}"
+    volumes:
+      # Mount the directories the agent should watch for MiniWDL workflow outputs.
+      # Each watched directory should contain UUID-named subdirectories with
+      # _LAST symlinks pointing to the current execution directory.
+      - ${SEPIIDA_WATCH_HOST_DIR:-./output}:/data/output:ro
+      # If archive is enabled, mount or bind the archive destination as well.
+      # - ${SEPIIDA_ARCHIVE_HOST_DIR:-./archive}:/data/archive
+    depends_on:
+      - server
+    networks:
+      - sepiida
+
+networks:
+  sepiida:
+    driver: bridge
