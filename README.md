@@ -47,13 +47,43 @@ MiniWDL使用 `-d uuid` 模式执行时，目录结构如下：
 
 ## 使用方法
 
-### 1. 编译
+### 1. Docker Compose 部署（推荐）
+
+**准备环境变量：**
+
+```bash
+cp .env.example .env
+# 编辑 .env，设置 DATABASE_URL、Key 等
+```
+
+`.env` 关键配置：
+```bash
+# 指向你的外部 Postgres 实例
+DATABASE_URL=postgres://user:password@host:5432/sepiida?sslmode=disable
+
+# Server 对外端口
+SERVER_PORT=9090
+```
+
+**仅启动 Server：**
+```bash
+docker compose -f docker-compose.server.yml build
+docker compose -f docker-compose.server.yml up -d
+```
+
+**同时启动 Server + Agent：**
+```bash
+docker compose build
+docker compose up -d
+```
+
+### 2. 编译（本地运行）
 
 ```bash
 make build
 ```
 
-### 2. 准备Key文件
+### 3. 准备Key文件
 
 创建两个Key文件：
 
@@ -77,7 +107,7 @@ key-002
 key-003
 ```
 
-### 3. 启动Server
+### 4. 启动Server
 
 ```bash
 ./bin/sepiida-server -p 8080 \
@@ -102,7 +132,7 @@ key-003
 | `-query-key` | Query Key文件路径 | **必填** |
 | `-key-refresh` | Key文件刷新间隔（秒） | 30 |
 
-### 4. 启动Agent
+### 5. 启动Agent
 
 ```bash
 # Agent使用agent-keys.txt中的某个key
@@ -124,7 +154,7 @@ key-003
 | `-archive-key-id` | 对象存储 Access Key ID（覆盖环境变量） | （读取环境变量） |
 | `-archive-key-secret` | 对象存储 Secret Access Key（覆盖环境变量） | （读取环境变量） |
 
-### 5. 对象存储归档（可选）
+### 6. 对象存储归档（可选）
 
 Agent 可以在 Workflow 成功完成后，自动将输出文件归档到对象存储或本地目录。通过 `-archive` 参数指定归档目标。
 
@@ -220,7 +250,7 @@ export AWS_SECRET_ACCESS_KEY=...
 
 **幂等性：** 每个 UUID 目录下的 `.sepiida.json` 状态文件会记录 `Archived` 标志，防止重复归档。
 
-### 6. 查询结果
+### 7. 查询结果
 
 使用query-keys.txt中的Key查询：
 
