@@ -16,7 +16,7 @@ version: "3.8"
 services:
   # ── Sepiida Server ────────────────────────────────────────────────────────
   server:
-    image: docker.schema-bio.com/sepiida-server:v0.2.0
+    image: docker.schema-bio.com/schemabio/sepiida-server:v0.2.0
     restart: unless-stopped
     command:
       - "-p=9090"
