@@ -102,12 +102,13 @@ func (h *ProgressHandler) HandleGetWorkflow(w http.ResponseWriter, r *http.Reque
 	}
 
 	if workflow == nil {
-		http.Error(w, "workflow not found", http.StatusNotFound)
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "workflow not found"})
 		return
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(workflow)
+	json.NewEncoder(w).Encode(map[string]interface{}{"workflow": workflow})
 }
 
 // HandleGetWorkflowTasks handles GET /api/v1/workflow/tasks?id=xxx
@@ -130,7 +131,10 @@ func (h *ProgressHandler) HandleGetWorkflowTasks(w http.ResponseWriter, r *http.
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(tasks)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tasks": tasks,
+		"total": len(tasks),
+	})
 }
 
 // HandleListWorkflows handles GET /api/v1/workflows
@@ -162,5 +166,8 @@ func (h *ProgressHandler) HandleListWorkflows(w http.ResponseWriter, r *http.Req
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(workflows)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"workflows": workflows,
+		"total":     len(workflows),
+	})
 }
