@@ -148,6 +148,10 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 					if err := collector.MarkArchived(result.UUIDDir); err != nil {
 						log.Printf("Failed to mark archived: %v", err)
 					}
+					// Notify server that archiving is complete
+					if err := sender.NotifyArchived(uuid); err != nil {
+						log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
+					}
 				}
 			}
 		}

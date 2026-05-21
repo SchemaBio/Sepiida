@@ -22,6 +22,8 @@ type Workflow struct {
 	OutputDir   string         `json:"output_dir"`   // Output directory path (full path to execution dir)
 	OutputsJSON string         `json:"outputs_json"` // outputs.json content
 	AgentID     string         `json:"agent_id"`     // Agent identifier
+	Archived    bool           `json:"archived"`     // Whether outputs have been archived to remote storage
+	ArchivedAt  *time.Time     `json:"archived_at,omitempty"` // When the archive was completed
 	CreatedAt   time.Time      `json:"created_at"`   // Record creation time
 	UpdatedAt   time.Time      `json:"updated_at"`   // Record update time
 }

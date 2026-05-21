@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -135,6 +136,36 @@ func (h *ProgressHandler) HandleGetWorkflowTasks(w http.ResponseWriter, r *http.
 		"tasks": tasks,
 		"total": len(tasks),
 	})
+}
+
+// HandleArchive handles POST /api/v1/workflow/archive
+func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		UUID string `json:"uuid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.UUID == "" {
+		http.Error(w, "missing uuid", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.service.MarkArchived(r.Context(), req.UUID); err != nil {
+		log.Printf("Failed to mark archived for UUID %s: %v", req.UUID, err)
+		http.Error(w, "failed to mark archived", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Workflow archived: UUID=%s", req.UUID)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "uuid": req.UUID})
 }
 
 // HandleListWorkflows handles GET /api/v1/workflows

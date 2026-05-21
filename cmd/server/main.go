@@ -85,6 +85,9 @@ func main() {
 	router.Handle("/api/v1/progress", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress)))
 	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleOutput)))
 
+	// Archive notification - agent auth (agent reports archive completion)
+	router.Handle("/api/v1/workflow/archive", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleArchive)))
+
 	// Query API routes - use query auth
 	router.Handle("/api/v1/workflow", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow)))
 	router.Handle("/api/v1/workflow/tasks", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflowTasks)))

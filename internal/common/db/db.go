@@ -17,6 +17,7 @@ type Database interface {
 	// Workflow operations
 	CreateWorkflow(ctx context.Context, workflow *model.Workflow) error
 	UpdateWorkflow(ctx context.Context, workflow *model.Workflow) error
+	MarkArchived(ctx context.Context, uuid string) error
 	GetWorkflow(ctx context.Context, id string) (*model.Workflow, error)
 	GetWorkflowByUUID(ctx context.Context, uuid string) (*model.Workflow, error)
 	GetWorkflowsByAgent(ctx context.Context, agentID string) ([]*model.Workflow, error)

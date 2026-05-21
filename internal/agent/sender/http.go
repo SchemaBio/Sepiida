@@ -57,6 +57,37 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	return nil
 }
 
+// NotifyArchived notifies the server that a workflow's outputs have been archived
+func (s *HTTPSender) NotifyArchived(uuid string) error {
+	url := s.serverURL + "/api/v1/workflow/archive"
+
+	body, err := json.Marshal(map[string]string{"uuid": uuid})
+	if err != nil {
+		return fmt.Errorf("failed to marshal archive notification: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // SendOutput sends workflow output to server (with UUID)
 func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON string) error {
 	url := s.serverURL + "/api/v1/workflow/output"

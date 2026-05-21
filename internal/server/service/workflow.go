@@ -125,3 +125,8 @@ func (s *WorkflowService) GetWorkflowTasks(ctx context.Context, workflowID strin
 func (s *WorkflowService) ListWorkflows(ctx context.Context, limit, offset int) ([]*model.Workflow, error) {
 	return s.db.ListWorkflows(ctx, limit, offset)
 }
+
+// MarkArchived marks a workflow's outputs as archived by UUID
+func (s *WorkflowService) MarkArchived(ctx context.Context, uuid string) error {
+	return s.db.MarkArchived(ctx, uuid)
+}
