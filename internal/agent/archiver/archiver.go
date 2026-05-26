@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
 
 // Archiver archives workflow outputs to a configurable destination.
@@ -101,8 +103,16 @@ func isS3URL(path string) bool {
 // files with dynamic schema based on header row; other files are archived individually
 // with flattened names (basename only). Finally, a rewritten outputs.json with paths
 // pointing to the archive location is uploaded.
-func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string) (int, error) {
+func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string) (*model.ArchiveResult, error) {
 	archived := 0
+	result := &model.ArchiveResult{
+		UUID:               uuid,
+		ArchiveBase:        a.backend.BasePath(),
+		BasePath:           a.backend.BasePath(),
+		OutputsResolvedKey: uuid + "/outputs.resolved.json",
+		ObjectPrefix:       uuid,
+		KeyPrefix:          uuid,
+	}
 
 	// 1. Archive workflow.log
 	logPath := filepath.Join(executionDir, "workflow.log")
@@ -132,7 +142,8 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 	resolvedJSON, pathMap, err := resolveOutputs(outputsPath)
 	if err != nil {
 		log.Printf("Warning: failed to resolve outputs.json for %s: %v", uuid, err)
-		return archived, nil
+		result.ArchivedCount = archived
+		return result, nil
 	}
 
 	log.Printf("Archive: resolved %d files for UUID %s, execDir=%s", len(pathMap), uuid, executionDir)
@@ -205,7 +216,8 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 	}
 
 	log.Printf("Archived %d items for UUID %s", archived, uuid)
-	return archived, nil
+	result.ArchivedCount = archived
+	return result, nil
 }
 
 // archiveFileByKey uploads a local file to a specific archive key.
@@ -435,4 +447,3 @@ func (a *Archiver) archiveFile(ctx context.Context, uuid string, executionDir st
 func (a *Archiver) Close() error {
 	return a.backend.Close()
 }
-

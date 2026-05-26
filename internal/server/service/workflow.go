@@ -20,18 +20,14 @@ func NewWorkflowService(db db.Database) *WorkflowService {
 
 // ProcessProgress processes progress data from agent
 func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.WorkflowProgress) error {
-	// Check if workflow exists by UUID (prefer UUID lookup)
-	existing, err := s.db.GetWorkflowByUUID(ctx, progress.UUID)
+	progress.Workflow.UUID = progress.UUID
+	progress.Workflow.AgentID = progress.AgentID
+
+	// Workflow ID identifies a concrete MiniWDL execution. A UUID can have
+	// multiple executions, so UUID lookup must not decide update vs create.
+	existing, err := s.db.GetWorkflow(ctx, progress.Workflow.ID)
 	if err != nil {
 		return err
-	}
-
-	// If not found by UUID, try by ID
-	if existing == nil {
-		existing, err = s.db.GetWorkflow(ctx, progress.Workflow.ID)
-		if err != nil {
-			return err
-		}
 	}
 
 	if existing == nil {
@@ -44,11 +40,7 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 		// Update existing workflow
 		log.Printf("Updating workflow: UUID=%s, ID=%s", progress.UUID, progress.Workflow.ID)
 		progress.Workflow.CreatedAt = existing.CreatedAt
-		// Preserve the existing ID if UUID matches but ID changed (new run)
-		if existing.UUID == progress.UUID && existing.ID != progress.Workflow.ID {
-			// This is a new run for the same UUID, keep using the new ID
-			log.Printf("New execution detected for UUID %s: old ID=%s, new ID=%s", progress.UUID, existing.ID, progress.Workflow.ID)
-		}
+		preserveArchiveFields(&progress.Workflow, existing)
 		if err := s.db.UpdateWorkflow(ctx, &progress.Workflow); err != nil {
 			return err
 		}
@@ -83,15 +75,14 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 
 // ProcessOutput processes workflow output
 func (s *WorkflowService) ProcessOutput(ctx context.Context, req *model.WorkflowOutputRequest) error {
-	// Find workflow by UUID
-	existing, err := s.db.GetWorkflowByUUID(ctx, req.UUID)
+	// Prefer workflow ID because a UUID can have multiple executions.
+	existing, err := s.db.GetWorkflow(ctx, req.WorkflowID)
 	if err != nil {
 		return err
 	}
 
 	if existing == nil {
-		// Try by ID
-		existing, err = s.db.GetWorkflow(ctx, req.WorkflowID)
+		existing, err = s.db.GetWorkflowByUUID(ctx, req.UUID)
 		if err != nil {
 			return err
 		}
@@ -127,6 +118,33 @@ func (s *WorkflowService) ListWorkflows(ctx context.Context, limit, offset int) 
 }
 
 // MarkArchived marks a workflow's outputs as archived by UUID
-func (s *WorkflowService) MarkArchived(ctx context.Context, uuid string) error {
-	return s.db.MarkArchived(ctx, uuid)
+func (s *WorkflowService) MarkArchived(ctx context.Context, result *model.ArchiveResult) error {
+	normalizeArchiveResult(result)
+	return s.db.MarkArchived(ctx, result)
+}
+
+func preserveArchiveFields(next *model.Workflow, existing *model.Workflow) {
+	next.Archived = existing.Archived
+	next.ArchivedAt = existing.ArchivedAt
+	next.ArchiveBase = existing.ArchiveBase
+	next.BasePath = existing.BasePath
+	next.OutputsResolvedKey = existing.OutputsResolvedKey
+	next.ObjectPrefix = existing.ObjectPrefix
+	next.KeyPrefix = existing.KeyPrefix
+	next.ArchivedCount = existing.ArchivedCount
+}
+
+func normalizeArchiveResult(result *model.ArchiveResult) {
+	if result.ArchiveBase == "" {
+		result.ArchiveBase = result.BasePath
+	}
+	if result.BasePath == "" {
+		result.BasePath = result.ArchiveBase
+	}
+	if result.ObjectPrefix == "" {
+		result.ObjectPrefix = result.KeyPrefix
+	}
+	if result.KeyPrefix == "" {
+		result.KeyPrefix = result.ObjectPrefix
+	}
 }

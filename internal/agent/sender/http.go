@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
+
+const defaultHTTPTimeout = 30 * time.Second
 
 // HTTPSender sends progress data to server via HTTP
 type HTTPSender struct {
@@ -22,7 +25,7 @@ func NewHTTPSender(serverURL, apiKey string) *HTTPSender {
 	return &HTTPSender{
 		serverURL: serverURL,
 		apiKey:    apiKey,
-		client:    &http.Client{},
+		client:    &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
 
@@ -57,11 +60,11 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	return nil
 }
 
-// NotifyArchived notifies the server that a workflow's outputs have been archived
-func (s *HTTPSender) NotifyArchived(uuid string) error {
+// NotifyArchived notifies the server that a workflow's outputs have been archived.
+func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	url := s.serverURL + "/api/v1/workflow/archive"
 
-	body, err := json.Marshal(map[string]string{"uuid": uuid})
+	body, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("failed to marshal archive notification: %w", err)
 	}

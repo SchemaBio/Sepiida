@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ func main() {
 	archivePath := flag.String("archive", "", "archive destination (local path, s3://, oss://, cos://, or http(s)://minio)")
 	archiveKeyID := flag.String("archive-key-id", "", "access key ID for object storage (overrides env vars)")
 	archiveKeySecret := flag.String("archive-key-secret", "", "secret access key for object storage (overrides env vars)")
+	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
 	flag.Parse()
 
 	// Parse watch directories
@@ -60,6 +62,7 @@ func main() {
 		}
 		defer arch.Close()
 		log.Printf("Archive destination: %s", *archivePath)
+		log.Printf("Archive timeout: %v", *archiveTimeout)
 	}
 
 	// Start polling loop
@@ -67,12 +70,32 @@ func main() {
 	defer ticker.Stop()
 
 	// Run first collection immediately
-	runCollection(progressCollector, httpSender, arch)
+	runCollection(progressCollector, httpSender, arch, *archiveTimeout)
 
 	// Then run on interval
 	for range ticker.C {
-		runCollection(progressCollector, httpSender, arch)
+		runCollection(progressCollector, httpSender, arch, *archiveTimeout)
 	}
+}
+
+func defaultArchiveTimeout() time.Duration {
+	const fallback = 30 * time.Minute
+
+	raw := strings.TrimSpace(os.Getenv("SEPIIDA_ARCHIVE_TIMEOUT"))
+	if raw == "" {
+		return fallback
+	}
+
+	timeout, err := time.ParseDuration(raw)
+	if err != nil {
+		log.Printf("Warning: invalid SEPIIDA_ARCHIVE_TIMEOUT=%q, using %v", raw, fallback)
+		return fallback
+	}
+	if timeout <= 0 {
+		log.Printf("Warning: non-positive SEPIIDA_ARCHIVE_TIMEOUT=%q, using %v", raw, fallback)
+		return fallback
+	}
+	return timeout
 }
 
 func parseWatchDirs(dirStr string) []string {
@@ -91,7 +114,7 @@ func parseWatchDirs(dirStr string) []string {
 	return dirs
 }
 
-func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver) {
+func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver, archiveTimeout time.Duration) {
 	log.Println("Collecting workflow progress...")
 
 	results, err := collector.Collect()
@@ -138,18 +161,18 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 		if arch != nil && result.Progress.Workflow.Status == "success" {
 			state, _ := collector.LoadState(result.UUIDDir)
 			if state != nil && !state.Archived {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-				_, err := arch.Archive(ctx, uuid, result.ExecutionDir)
+				ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
+				archiveResult, err := arch.Archive(ctx, uuid, result.ExecutionDir)
 				cancel()
 				if err != nil {
 					log.Printf("Failed to archive for UUID %s: %v", uuid, err)
 				} else {
-					log.Printf("Successfully archived for UUID %s", uuid)
+					log.Printf("Successfully archived %d items for UUID %s", archiveResult.ArchivedCount, uuid)
 					if err := collector.MarkArchived(result.UUIDDir); err != nil {
 						log.Printf("Failed to mark archived: %v", err)
 					}
 					// Notify server that archiving is complete
-					if err := sender.NotifyArchived(uuid); err != nil {
+					if err := sender.NotifyArchived(archiveResult); err != nil {
 						log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
 					}
 				}

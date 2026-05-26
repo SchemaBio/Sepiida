@@ -145,9 +145,7 @@ func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req struct {
-		UUID string `json:"uuid"`
-	}
+	var req model.ArchiveResult
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -157,13 +155,13 @@ func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.service.MarkArchived(r.Context(), req.UUID); err != nil {
+	if err := h.service.MarkArchived(r.Context(), &req); err != nil {
 		log.Printf("Failed to mark archived for UUID %s: %v", req.UUID, err)
 		http.Error(w, "failed to mark archived", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("Workflow archived: UUID=%s", req.UUID)
+	log.Printf("Workflow archived: UUID=%s, outputs_resolved_key=%s, archived_count=%d", req.UUID, req.OutputsResolvedKey, req.ArchivedCount)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "uuid": req.UUID})
 }
