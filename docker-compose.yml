@@ -17,6 +17,9 @@ version: "3.8"
 services:
   # ── Sepiida Server ────────────────────────────────────────────────────────
   server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
     image: docker.schema-bio.com/schemabio/sepiida-server:v0.2.0
     restart: unless-stopped
     command:
@@ -24,12 +27,12 @@ services:
       - "-d=${DATABASE_URL}"
       - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
       - "-query-key=/etc/sepiida/keys/query-keys.txt"
-      - "-key-refresh=30"
+      - "-key-refresh=${SEPIIDA_KEY_REFRESH_SECONDS:-30}"
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
-      - ./agent-keys.txt:/etc/sepiida/keys/agent-keys.txt:ro
-      - ./query-keys.txt:/etc/sepiida/keys/query-keys.txt:ro
+      - ${SEPIIDA_AGENT_KEYS_FILE:-./agent-keys.txt}:/etc/sepiida/keys/agent-keys.txt:ro
+      - ${SEPIIDA_QUERY_KEYS_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
     networks:
       - sepiida
 
@@ -45,13 +48,17 @@ services:
       - "-id=${SEPIIDA_AGENT_ID:-agent-001}"
       - "-i=${SEPIIDA_AGENT_INTERVAL:-60}"
       - "-w=${SEPIIDA_WATCH_DIRS:-/data/output}"
+      - "-archive=${SEPIIDA_ARCHIVE_URL:-}"
+      - "-archive-key-id=${SEPIIDA_ARCHIVE_KEY_ID:-}"
+      - "-archive-key-secret=${SEPIIDA_ARCHIVE_KEY_SECRET:-}"
+      - "-archive-timeout=${SEPIIDA_ARCHIVE_TIMEOUT:-30m}"
     volumes:
       # Mount the directories the agent should watch for MiniWDL workflow outputs.
       # Each watched directory should contain UUID-named subdirectories with
       # _LAST symlinks pointing to the current execution directory.
       - ${SEPIIDA_WATCH_HOST_DIR:-./output}:/data/output:ro
       # If archive is enabled, mount or bind the archive destination as well.
-      # - ${SEPIIDA_ARCHIVE_HOST_DIR:-./archive}:/data/archive
+      - ${SEPIIDA_ARCHIVE_HOST_DIR:-./archive}:/data/archive
     depends_on:
       - server
     networks:
