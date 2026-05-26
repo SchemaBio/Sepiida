@@ -46,6 +46,7 @@ type WorkflowProgress struct {
 type WorkflowOutputRequest struct {
 	WorkflowID  string `json:"workflow_id"`
 	UUID        string `json:"uuid"` // Sample UUID
+	AgentID     string `json:"agent_id,omitempty"`
 	OutputsJSON string `json:"outputs_json"`
 }
 
@@ -54,6 +55,7 @@ type WorkflowOutputRequest struct {
 // use either archive_base/base_path or object_prefix/key_prefix naming.
 type ArchiveResult struct {
 	UUID               string `json:"uuid"`
+	AgentID            string `json:"agent_id,omitempty"`
 	ArchiveBase        string `json:"archive_base,omitempty"`
 	BasePath           string `json:"base_path,omitempty"`
 	OutputsResolvedKey string `json:"outputs_resolved_key,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
+	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
 )
 
@@ -37,6 +38,9 @@ func (h *ProgressHandler) HandleProgress(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "missing uuid", http.StatusBadRequest)
 		return
 	}
+	if !authorizeTaskToken(w, r, progress.UUID, progress.AgentID) {
+		return
+	}
 
 	if err := h.service.ProcessProgress(r.Context(), &progress); err != nil {
 		http.Error(w, "failed to process progress", http.StatusInternalServerError)
@@ -62,6 +66,9 @@ func (h *ProgressHandler) HandleOutput(w http.ResponseWriter, r *http.Request) {
 
 	if req.UUID == "" {
 		http.Error(w, "missing uuid", http.StatusBadRequest)
+		return
+	}
+	if !authorizeTaskToken(w, r, req.UUID, req.AgentID) {
 		return
 	}
 
@@ -154,6 +161,9 @@ func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "missing uuid", http.StatusBadRequest)
 		return
 	}
+	if !authorizeTaskToken(w, r, req.UUID, req.AgentID) {
+		return
+	}
 
 	if err := h.service.MarkArchived(r.Context(), &req); err != nil {
 		log.Printf("Failed to mark archived for UUID %s: %v", req.UUID, err)
@@ -164,6 +174,22 @@ func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) 
 	log.Printf("Workflow archived: UUID=%s, outputs_resolved_key=%s, archived_count=%d", req.UUID, req.OutputsResolvedKey, req.ArchivedCount)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "uuid": req.UUID})
+}
+
+func authorizeTaskToken(w http.ResponseWriter, r *http.Request, uuid, agentID string) bool {
+	claims, ok := middleware.TaskTokenClaims(r.Context())
+	if !ok {
+		return true
+	}
+	if claims.UUID != uuid {
+		http.Error(w, "task token uuid mismatch", http.StatusForbidden)
+		return false
+	}
+	if agentID != "" && claims.AgentID != agentID {
+		http.Error(w, "task token agent_id mismatch", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // HandleListWorkflows handles GET /api/v1/workflows

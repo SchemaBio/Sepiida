@@ -50,7 +50,7 @@ func main() {
 	// Create components
 	logParser := parser.NewLogParser()
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
-	httpSender := sender.NewHTTPSender(*serverURL, *apiKey)
+	httpSender := sender.NewHTTPSender(*serverURL, *apiKey, *agentID)
 
 	// Create archiver if archive path is specified
 	var arch *archiver.Archiver

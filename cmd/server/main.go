@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ func main() {
 	agentKeyFile := flag.String("agent-key", "", "path to agent key file (keys for pushing data)")
 	queryKeyFile := flag.String("query-key", "", "path to query key file (keys for querying results)")
 	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
+	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task agent tokens")
 	flag.Parse()
 
 	// Validate key files
@@ -75,7 +77,7 @@ func main() {
 	progressHandler := handler.NewProgressHandler(workflowService)
 
 	// Create authentication middleware
-	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager())
+	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret)
 	queryAuth := middleware.NewQueryAuthMiddleware(mkm.GetQueryKeyManager())
 
 	// Setup routes

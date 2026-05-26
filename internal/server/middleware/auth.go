@@ -6,16 +6,22 @@ import (
 	"strings"
 
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
+	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
+
+type contextKey string
+
+const taskTokenClaimsKey contextKey = "task_token_claims"
 
 // AgentAuthMiddleware provides API key authentication for agent operations (push data)
 type AgentAuthMiddleware struct {
-	keyMgr *apikey.KeyManager
+	keyMgr          *apikey.KeyManager
+	taskTokenSecret string
 }
 
 // NewAgentAuthMiddleware creates a new agent authentication middleware
-func NewAgentAuthMiddleware(keyMgr *apikey.KeyManager) *AgentAuthMiddleware {
-	return &AgentAuthMiddleware{keyMgr: keyMgr}
+func NewAgentAuthMiddleware(keyMgr *apikey.KeyManager, taskTokenSecret string) *AgentAuthMiddleware {
+	return &AgentAuthMiddleware{keyMgr: keyMgr, taskTokenSecret: taskTokenSecret}
 }
 
 // Middleware returns the authentication middleware function
@@ -37,6 +43,17 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 
 		apiKey := parts[1]
 
+		if tasktoken.LooksLike(apiKey) && a.taskTokenSecret != "" {
+			claims, err := tasktoken.Validate(a.taskTokenSecret, apiKey)
+			if err != nil {
+				http.Error(w, "invalid task token", http.StatusUnauthorized)
+				return
+			}
+			ctx := context.WithValue(r.Context(), taskTokenClaimsKey, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		// Validate API key using agent key manager
 		if !a.keyMgr.Validate(apiKey) {
 			http.Error(w, "invalid api key", http.StatusUnauthorized)
@@ -47,6 +64,11 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), "api_key", apiKey)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func TaskTokenClaims(ctx context.Context) (*tasktoken.Claims, bool) {
+	claims, ok := ctx.Value(taskTokenClaimsKey).(*tasktoken.Claims)
+	return claims, ok
 }
 
 // QueryAuthMiddleware provides API key authentication for query operations

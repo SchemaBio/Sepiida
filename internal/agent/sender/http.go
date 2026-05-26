@@ -17,14 +17,16 @@ const defaultHTTPTimeout = 30 * time.Second
 type HTTPSender struct {
 	serverURL string
 	apiKey    string
+	agentID   string
 	client    *http.Client
 }
 
 // NewHTTPSender creates a new HTTP sender
-func NewHTTPSender(serverURL, apiKey string) *HTTPSender {
+func NewHTTPSender(serverURL, apiKey, agentID string) *HTTPSender {
 	return &HTTPSender{
 		serverURL: serverURL,
 		apiKey:    apiKey,
+		agentID:   agentID,
 		client:    &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
@@ -63,6 +65,9 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 // NotifyArchived notifies the server that a workflow's outputs have been archived.
 func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	url := s.serverURL + "/api/v1/workflow/archive"
+	if result.AgentID == "" {
+		result.AgentID = s.agentID
+	}
 
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -98,6 +103,7 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 	reqBody := model.WorkflowOutputRequest{
 		UUID:        uuid,
 		WorkflowID:  workflowID,
+		AgentID:     s.agentID,
 		OutputsJSON: outputsJSON,
 	}
 

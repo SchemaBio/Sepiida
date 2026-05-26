@@ -27,6 +27,7 @@ services:
       - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
       - "-query-key=/etc/sepiida/keys/query-keys.txt"
       - "-key-refresh=${SEPIIDA_KEY_REFRESH_SECONDS:-30}"
+      - "-task-token-secret=${SEPIIDA_TASK_TOKEN_SECRET:-}"
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
