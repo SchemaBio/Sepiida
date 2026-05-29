@@ -25,7 +25,7 @@ func NewLogParser() *LogParser {
 // ParseWorkflowStart parses workflow start line
 // Format: 2026-04-28 09:49:55.697 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "...", dir: "/mnt/data/output/20260428_094955_SingleWES"
 func (p *LogParser) ParseWorkflowStart(line string) (*model.Workflow, error) {
-	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:([^\s]+) NOTICE workflow start :: name: "([^"]+)", source: "([^"]+)", .* dir: "([^"]+)"`)
+	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:([^\s]+) NOTICE workflow start :: name: "([^"]+)", source: "([^"]+)", .*dir: "([^"]+)"`)
 	matches := pattern.FindStringSubmatch(line)
 
 	if len(matches) < 6 {
@@ -57,7 +57,7 @@ func (p *LogParser) ParseWorkflowStart(line string) (*model.Workflow, error) {
 // ParseTaskSetup parses task setup line
 // Format: 2026-04-28 09:49:55.708 wdl.w:SingleWES.t:call-CreateMitoBed NOTICE task setup :: name: "CreateMitoBed", source: "...", dir: "..."
 func (p *LogParser) ParseTaskSetup(line string) (*model.Task, error) {
-	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:[^\s]+\.t:(call-[^\s]+) NOTICE task setup :: name: "([^"]+)", .* dir: "([^"]+)"`)
+	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:[^\s]+\.t:(call-[^\s]+) NOTICE task setup :: name: "([^"]+)", .*dir: "([^"]+)"`)
 	matches := pattern.FindStringSubmatch(line)
 
 	if len(matches) < 5 {

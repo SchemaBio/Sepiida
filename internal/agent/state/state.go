@@ -209,7 +209,6 @@ func (s *StateManager) createNewState(uuid string, executionDir string, workflow
 		WorkflowID:     workflow.ID,
 		WorkflowStatus: workflow.Status,
 		LastPushedAt:   time.Now(),
-		OutputsPushed:  workflow.OutputsJSON != "",
 		TaskStates:     taskStates,
 		ExecutionDir:   executionDir,
 	}

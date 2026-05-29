@@ -83,6 +83,28 @@ func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) 
 	}
 }
 
+func TestHasStateChangedDoesNotMarkOutputsPushedBeforeSendSuccess(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "workflow.log")
+	mustWriteStateTestFile(t, logPath, "workflow log")
+	info := mustStatStateTestFile(t, logPath)
+
+	manager := NewStateManager()
+	workflow := &model.Workflow{
+		ID:          "run-1",
+		Status:      model.WorkflowStatusSuccess,
+		OutputsJSON: `{"result":"ok"}`,
+	}
+
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-1"), workflow, nil, info)
+	if !changed {
+		t.Fatal("expected completed workflow to be pushed")
+	}
+	if next.OutputsPushed {
+		t.Fatalf("outputs were marked pushed before send success: %+v", next)
+	}
+}
+
 func mustWriteStateTestFile(t *testing.T, path string, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
