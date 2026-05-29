@@ -138,17 +138,28 @@ func (p *PostgreSQL) UpdateWorkflow(ctx context.Context, workflow *model.Workflo
 	return nil
 }
 
-// MarkArchived marks a workflow as archived by UUID
+// MarkArchived marks a concrete workflow execution as archived. New agents send
+// WorkflowID; UUID fallback is kept for compatibility with older agents.
 func (p *PostgreSQL) MarkArchived(ctx context.Context, result *model.ArchiveResult) error {
 	now := time.Now()
-	res, err := p.db.ExecContext(ctx, `
+	query := `
 		UPDATE workflows
 		SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9
-		WHERE id = (
-			SELECT id FROM workflows WHERE uuid=$10 ORDER BY created_at DESC LIMIT 1
-		)`,
+		WHERE id=$10`
+	workflowKey := result.WorkflowID
+	if workflowKey == "" {
+		query = `
+			UPDATE workflows
+			SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9
+			WHERE id = (
+				SELECT id FROM workflows WHERE uuid=$10 ORDER BY created_at DESC LIMIT 1
+			)`
+		workflowKey = result.UUID
+	}
+
+	res, err := p.db.ExecContext(ctx, query,
 		true, now, result.ArchiveBase, result.BasePath, result.OutputsResolvedKey,
-		result.ObjectPrefix, result.KeyPrefix, result.ArchivedCount, now, result.UUID)
+		result.ObjectPrefix, result.KeyPrefix, result.ArchivedCount, now, workflowKey)
 	if err != nil {
 		return err
 	}

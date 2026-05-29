@@ -42,6 +42,29 @@ func (f *fakeDB) UpdateWorkflow(ctx context.Context, workflow *model.Workflow) e
 func (f *fakeDB) MarkArchived(ctx context.Context, result *model.ArchiveResult) error {
 	cp := *result
 	f.archived = &cp
+	workflowID := cp.WorkflowID
+	if workflowID == "" {
+		workflow, err := f.GetWorkflowByUUID(ctx, cp.UUID)
+		if err != nil {
+			return err
+		}
+		if workflow != nil {
+			workflowID = workflow.ID
+		}
+	}
+	if workflowID != "" {
+		if workflow, ok := f.workflows[workflowID]; ok {
+			updated := *workflow
+			updated.Archived = true
+			updated.ArchiveBase = cp.ArchiveBase
+			updated.BasePath = cp.BasePath
+			updated.OutputsResolvedKey = cp.OutputsResolvedKey
+			updated.ObjectPrefix = cp.ObjectPrefix
+			updated.KeyPrefix = cp.KeyPrefix
+			updated.ArchivedCount = cp.ArchivedCount
+			f.workflows[workflowID] = &updated
+		}
+	}
 	return nil
 }
 
@@ -216,5 +239,45 @@ func TestMarkArchivedNormalizesAliases(t *testing.T) {
 	}
 	if db.archived.ObjectPrefix != "sample-uuid" || db.archived.KeyPrefix != "sample-uuid" {
 		t.Fatalf("key prefix aliases were not normalized: %+v", db.archived)
+	}
+}
+
+func TestMarkArchivedTargetsWorkflowID(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+
+	db.workflows["run-1"] = &model.Workflow{
+		ID:        "run-1",
+		UUID:      "sample-uuid",
+		Name:      "Workflow",
+		Status:    model.WorkflowStatusSuccess,
+		CreatedAt: time.Now().Add(-time.Hour),
+	}
+	db.workflows["run-2"] = &model.Workflow{
+		ID:        "run-2",
+		UUID:      "sample-uuid",
+		Name:      "Workflow",
+		Status:    model.WorkflowStatusRunning,
+		CreatedAt: time.Now(),
+	}
+
+	err := service.MarkArchived(ctx, &model.ArchiveResult{
+		UUID:               "sample-uuid",
+		WorkflowID:         "run-1",
+		ArchiveBase:        "archive-base",
+		OutputsResolvedKey: "sample-uuid/outputs.resolved.json",
+		ObjectPrefix:       "sample-uuid",
+		ArchivedCount:      5,
+	})
+	if err != nil {
+		t.Fatalf("MarkArchived returned error: %v", err)
+	}
+
+	if !db.workflows["run-1"].Archived {
+		t.Fatalf("target workflow was not marked archived: %+v", db.workflows["run-1"])
+	}
+	if db.workflows["run-2"].Archived {
+		t.Fatalf("latest workflow was incorrectly marked archived: %+v", db.workflows["run-2"])
 	}
 }

@@ -163,7 +163,7 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 			state, _ := collector.LoadState(result.UUIDDir)
 			if state != nil && !state.Archived {
 				ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
-				archiveResult, err := arch.Archive(ctx, uuid, result.ExecutionDir)
+				archiveResult, err := arch.ArchiveWorkflow(ctx, uuid, workflowID, result.ExecutionDir)
 				cancel()
 				if err != nil {
 					log.Printf("Failed to archive for UUID %s: %v", uuid, err)

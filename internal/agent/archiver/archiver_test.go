@@ -30,6 +30,7 @@ func TestArchiveReturnsManifest(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	uuid := "sample-uuid"
+	workflowID := "run-1"
 	outputFile := filepath.Join(dir, "result.bam")
 
 	mustWrite(t, filepath.Join(dir, "workflow.log"), "workflow log")
@@ -43,13 +44,16 @@ func TestArchiveReturnsManifest(t *testing.T) {
 	}
 	archiver := NewArchiver(backend)
 
-	result, err := archiver.Archive(ctx, uuid, dir)
+	result, err := archiver.ArchiveWorkflow(ctx, uuid, workflowID, dir)
 	if err != nil {
 		t.Fatalf("Archive returned error: %v", err)
 	}
 
 	if result.UUID != uuid {
 		t.Fatalf("unexpected uuid: %+v", result)
+	}
+	if result.WorkflowID != workflowID {
+		t.Fatalf("unexpected workflow id: %+v", result)
 	}
 	if result.ArchiveBase != backend.basePath || result.BasePath != backend.basePath {
 		t.Fatalf("unexpected archive base aliases: %+v", result)

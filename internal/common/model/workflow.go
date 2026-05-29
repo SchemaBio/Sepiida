@@ -55,6 +55,7 @@ type WorkflowOutputRequest struct {
 // use either archive_base/base_path or object_prefix/key_prefix naming.
 type ArchiveResult struct {
 	UUID               string `json:"uuid"`
+	WorkflowID         string `json:"workflow_id,omitempty"`
 	AgentID            string `json:"agent_id,omitempty"`
 	ArchiveBase        string `json:"archive_base,omitempty"`
 	BasePath           string `json:"base_path,omitempty"`

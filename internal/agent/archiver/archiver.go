@@ -104,9 +104,16 @@ func isS3URL(path string) bool {
 // with flattened names (basename only). Finally, a rewritten outputs.json with paths
 // pointing to the archive location is uploaded.
 func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string) (*model.ArchiveResult, error) {
+	return a.ArchiveWorkflow(ctx, uuid, "", executionDir)
+}
+
+// ArchiveWorkflow archives a completed workflow and records the concrete
+// workflow ID in the result so the server can update the correct execution.
+func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID string, executionDir string) (*model.ArchiveResult, error) {
 	archived := 0
 	result := &model.ArchiveResult{
 		UUID:               uuid,
+		WorkflowID:         workflowID,
 		ArchiveBase:        a.backend.BasePath(),
 		BasePath:           a.backend.BasePath(),
 		OutputsResolvedKey: uuid + "/outputs.resolved.json",

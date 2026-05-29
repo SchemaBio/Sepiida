@@ -122,8 +122,11 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		// Load previous state to check if outputs need resolving
 		prevState, _ := c.stateMgr.LoadState(uuidDir)
 
-		// Read outputs.json if workflow is done and outputs haven't been pushed yet
-		if workflow.Status == model.WorkflowStatusSuccess && (prevState == nil || !prevState.OutputsPushed) {
+		sameExecution := prevState != nil && prevState.ExecutionDir == executionDir && prevState.WorkflowID == workflow.ID
+
+		// Read outputs.json if workflow is done and this concrete execution has
+		// not pushed outputs yet. A UUID can point _LAST at a new execution.
+		if workflow.Status == model.WorkflowStatusSuccess && (!sameExecution || !prevState.OutputsPushed) {
 			outputsFile := filepath.Join(executionDir, "outputs.json")
 			if resolved, err := resolveOutputsJSON(outputsFile); err == nil {
 				workflow.OutputsJSON = resolved

@@ -1,0 +1,100 @@
+package state
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/SchemaBio/Sepiida/internal/common/model"
+)
+
+func TestHasStateChangedResetsIdempotencyFlagsForNewExecution(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "workflow.log")
+	mustWriteStateTestFile(t, logPath, "workflow log")
+	info := mustStatStateTestFile(t, logPath)
+
+	manager := NewStateManager()
+	prev := &WorkflowState{
+		UUID:           "sample-uuid",
+		WorkflowID:     "run-1",
+		WorkflowStatus: model.WorkflowStatusSuccess,
+		OutputsPushed:  true,
+		Archived:       true,
+		ExecutionDir:   filepath.Join(dir, "run-1"),
+	}
+	if err := manager.SaveState(dir, prev); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	workflow := &model.Workflow{
+		ID:     "run-2",
+		Status: model.WorkflowStatusSuccess,
+	}
+
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-2"), workflow, nil, info)
+	if !changed {
+		t.Fatal("expected new execution to be pushed")
+	}
+	if next.OutputsPushed {
+		t.Fatalf("new execution inherited OutputsPushed: %+v", next)
+	}
+	if next.Archived {
+		t.Fatalf("new execution inherited Archived: %+v", next)
+	}
+}
+
+func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "workflow.log")
+	mustWriteStateTestFile(t, logPath, "workflow log")
+	info := mustStatStateTestFile(t, logPath)
+
+	executionDir := filepath.Join(dir, "run-1")
+	manager := NewStateManager()
+	prev := &WorkflowState{
+		UUID:           "sample-uuid",
+		WorkflowID:     "run-1",
+		WorkflowStatus: model.WorkflowStatusSuccess,
+		OutputsPushed:  true,
+		Archived:       true,
+		LogFileSize:    info.Size() + 1,
+		LogFileModTime: info.ModTime(),
+		ExecutionDir:   executionDir,
+	}
+	if err := manager.SaveState(dir, prev); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+
+	workflow := &model.Workflow{
+		ID:     "run-1",
+		Status: model.WorkflowStatusSuccess,
+	}
+
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", executionDir, workflow, nil, info)
+	if !changed {
+		t.Fatal("expected log size change to trigger push")
+	}
+	if !next.OutputsPushed {
+		t.Fatalf("same execution did not preserve OutputsPushed: %+v", next)
+	}
+	if !next.Archived {
+		t.Fatalf("same execution did not preserve Archived: %+v", next)
+	}
+}
+
+func mustWriteStateTestFile(t *testing.T, path string, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("failed to write %s: %v", path, err)
+	}
+}
+
+func mustStatStateTestFile(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("failed to stat %s: %v", path, err)
+	}
+	return info
+}

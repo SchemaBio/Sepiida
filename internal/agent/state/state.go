@@ -14,23 +14,23 @@ const StateFileName = ".sepiida.json"
 
 // WorkflowState represents the monitoring state of a workflow
 type WorkflowState struct {
-	UUID            string              `json:"uuid"`
-	WorkflowID      string              `json:"workflow_id"`
-	WorkflowStatus  model.WorkflowStatus `json:"workflow_status"`
-	LastPushedAt    time.Time           `json:"last_pushed_at"`
-	OutputsPushed   bool                `json:"outputs_pushed"`
-	Archived        bool                `json:"archived"`
-	TaskStates      map[string]TaskState `json:"task_states"`
-	LogFileSize     int64               `json:"log_file_size"`
-	LogFileModTime  time.Time           `json:"log_file_mod_time"`
-	ExecutionDir    string              `json:"execution_dir"` // Current execution directory (from _LAST)
+	UUID           string               `json:"uuid"`
+	WorkflowID     string               `json:"workflow_id"`
+	WorkflowStatus model.WorkflowStatus `json:"workflow_status"`
+	LastPushedAt   time.Time            `json:"last_pushed_at"`
+	OutputsPushed  bool                 `json:"outputs_pushed"`
+	Archived       bool                 `json:"archived"`
+	TaskStates     map[string]TaskState `json:"task_states"`
+	LogFileSize    int64                `json:"log_file_size"`
+	LogFileModTime time.Time            `json:"log_file_mod_time"`
+	ExecutionDir   string               `json:"execution_dir"` // Current execution directory (from _LAST)
 }
 
 // TaskState represents the state snapshot of a task
 type TaskState struct {
-	Name     string          `json:"name"`
+	Name     string           `json:"name"`
 	Status   model.TaskStatus `json:"status"`
-	ExitCode int             `json:"exit_code"`
+	ExitCode int              `json:"exit_code"`
 }
 
 // StateManager manages workflow monitoring states
@@ -175,10 +175,15 @@ func (s *StateManager) MarkArchived(uuidDir string) error {
 	return s.SaveState(uuidDir, state)
 }
 
-// newState creates a new workflow state, preserving the Archived flag from prevState if applicable
+// newState creates a new workflow state, preserving idempotency flags only for
+// the same concrete execution. A UUID can be run multiple times, and a new
+// execution must not inherit the previous run's archive/output markers.
 func (s *StateManager) newState(prevState *WorkflowState, uuid string, executionDir string, workflow *model.Workflow, tasks []model.Task, logFileInfo os.FileInfo) *WorkflowState {
 	newState := s.createNewState(uuid, executionDir, workflow, tasks, logFileInfo)
-	if prevState != nil {
+	if prevState != nil && prevState.ExecutionDir == executionDir && prevState.WorkflowID == workflow.ID {
+		if prevState.OutputsPushed && !newState.OutputsPushed {
+			newState.OutputsPushed = true
+		}
 		newState.Archived = prevState.Archived
 	}
 	return newState
