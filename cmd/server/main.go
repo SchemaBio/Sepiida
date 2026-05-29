@@ -183,6 +183,10 @@ func redactDatabaseURL(conn string) string {
 }
 
 func parsePostgresConn(conn string) db.Config {
+	if strings.Contains(conn, "://") {
+		return db.Config{DSN: conn}
+	}
+
 	// Strip postgres:// prefix
 	conn = strings.TrimPrefix(conn, "postgres://")
 

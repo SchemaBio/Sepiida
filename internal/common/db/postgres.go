@@ -17,8 +17,11 @@ type PostgreSQL struct {
 
 // NewPostgreSQL creates a new PostgreSQL database instance
 func NewPostgreSQL(cfg Config) (*PostgreSQL, error) {
-	connStr := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database)
+	connStr := cfg.DSN
+	if connStr == "" {
+		connStr = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database)
+	}
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {

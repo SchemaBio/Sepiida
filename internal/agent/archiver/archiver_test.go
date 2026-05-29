@@ -77,6 +77,54 @@ func TestArchiveReturnsManifest(t *testing.T) {
 	}
 }
 
+func TestNewFromPathSupportsLocalArchive(t *testing.T) {
+	ctx := context.Background()
+	executionDir := t.TempDir()
+	archiveDir := filepath.Join(t.TempDir(), "archive")
+	uuid := "sample-uuid"
+	outputFile := filepath.Join(executionDir, "result.bam")
+
+	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
+	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
+	mustWrite(t, outputFile, "bam data")
+	mustWrite(t, filepath.Join(executionDir, "outputs.json"), `{"bam":"`+outputFile+`"}`)
+
+	archiver, err := NewFromPath(archiveDir, "", "")
+	if err != nil {
+		t.Fatalf("NewFromPath returned error: %v", err)
+	}
+
+	result, err := archiver.ArchiveWorkflow(ctx, uuid, "run-1", executionDir)
+	if err != nil {
+		t.Fatalf("ArchiveWorkflow returned error: %v", err)
+	}
+	if result.ArchiveBase != archiveDir {
+		t.Fatalf("unexpected local archive base: %+v", result)
+	}
+
+	for _, relPath := range []string{
+		filepath.Join(uuid, "workflow.log"),
+		filepath.Join(uuid, "inputs.json"),
+		filepath.Join(uuid, "outputs.json"),
+		filepath.Join(uuid, "result.bam"),
+		filepath.Join(uuid, "outputs.resolved.json"),
+	} {
+		if _, err := os.Stat(filepath.Join(archiveDir, relPath)); err != nil {
+			t.Fatalf("missing archived file %s: %v", relPath, err)
+		}
+	}
+}
+
+func TestLocalBackendRejectsEscapingKeys(t *testing.T) {
+	backend, err := NewLocalBackend(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalBackend returned error: %v", err)
+	}
+	if err := backend.Upload(context.Background(), "../escape.txt", strings.NewReader("bad"), 3); err == nil {
+		t.Fatal("expected escaping key to be rejected")
+	}
+}
+
 func mustWrite(t *testing.T, path string, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {

@@ -9,9 +9,10 @@ import (
 )
 
 type fakeDB struct {
-	workflows map[string]*model.Workflow
-	tasks     map[string]*model.Task
-	archived  *model.ArchiveResult
+	workflows     map[string]*model.Workflow
+	tasks         map[string]*model.Task
+	archived      *model.ArchiveResult
+	lastListLimit int
 }
 
 func newFakeDB() *fakeDB {
@@ -95,6 +96,7 @@ func (f *fakeDB) GetWorkflowsByAgent(ctx context.Context, agentID string) ([]*mo
 }
 
 func (f *fakeDB) ListWorkflows(ctx context.Context, limit, offset int) ([]*model.Workflow, error) {
+	f.lastListLimit = limit
 	return nil, nil
 }
 

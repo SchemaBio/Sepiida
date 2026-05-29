@@ -16,6 +16,11 @@ type ProgressHandler struct {
 	service *service.WorkflowService
 }
 
+const (
+	defaultWorkflowListLimit = 100
+	maxWorkflowListLimit     = 500
+)
+
 // NewProgressHandler creates a new progress handler
 func NewProgressHandler(service *service.WorkflowService) *ProgressHandler {
 	return &ProgressHandler{service: service}
@@ -199,7 +204,7 @@ func (h *ProgressHandler) HandleListWorkflows(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	limit := 100
+	limit := defaultWorkflowListLimit
 	offset := 0
 
 	// Parse query parameters
@@ -207,6 +212,9 @@ func (h *ProgressHandler) HandleListWorkflows(w http.ResponseWriter, r *http.Req
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit > maxWorkflowListLimit {
+		limit = maxWorkflowListLimit
 	}
 	if o := r.URL.Query().Get("offset"); o != "" {
 		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {

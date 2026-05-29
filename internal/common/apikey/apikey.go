@@ -2,7 +2,9 @@ package apikey
 
 import (
 	"bufio"
+	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,6 +48,7 @@ func (km *KeyManager) loadKeys() {
 	info, err := os.Stat(km.keyFile)
 	if err != nil {
 		// File doesn't exist or inaccessible, keep existing keys
+		log.Printf("Warning: failed to stat key file %s: %v", km.keyFile, err)
 		return
 	}
 
@@ -62,6 +65,7 @@ func (km *KeyManager) loadKeys() {
 	// Read file
 	file, err := os.Open(km.keyFile)
 	if err != nil {
+		log.Printf("Warning: failed to open key file %s: %v", km.keyFile, err)
 		return
 	}
 	defer file.Close()
@@ -69,7 +73,7 @@ func (km *KeyManager) loadKeys() {
 	newKeys := make(map[string]bool)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSpace(scanner.Text())
 		// Skip empty lines and comments
 		if line == "" || (len(line) > 0 && line[0] == '#') {
 			continue
@@ -78,6 +82,7 @@ func (km *KeyManager) loadKeys() {
 	}
 
 	if err := scanner.Err(); err != nil {
+		log.Printf("Warning: failed to read key file %s: %v", km.keyFile, err)
 		return
 	}
 

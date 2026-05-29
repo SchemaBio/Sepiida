@@ -32,6 +32,7 @@ type Database interface {
 
 // Config represents PostgreSQL database configuration
 type Config struct {
+	DSN      string
 	Host     string
 	Port     int
 	User     string

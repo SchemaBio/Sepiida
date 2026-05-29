@@ -44,7 +44,7 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 	} else if isS3URL(archivePath) {
 		backend, err = NewS3Backend(archivePath, accessKeyID, secretAccessKey)
 	} else {
-		return nil, fmt.Errorf("no remote archive URL configured: unsupported archive path %q (must be cos://, s3://, oss://, or https://)", archivePath)
+		backend, err = NewLocalBackend(archivePath)
 	}
 
 	if err != nil {

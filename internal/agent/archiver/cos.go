@@ -15,10 +15,10 @@ import (
 
 // COSBackend archives files to Tencent Cloud COS using the official SDK.
 type COSBackend struct {
-	client   *cos.Client
-	bucket   string
-	region   string
-	prefix   string
+	client    *cos.Client
+	bucket    string
+	region    string
+	prefix    string
 	bucketURL string // https://<bucket>.cos.<region>.myqcloud.com
 }
 
@@ -78,8 +78,8 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 	} else {
 		// Read from environment variables
 		transport = &cos.AuthorizationTransport{
-			SecretID:  os.Getenv("COS_SECRET_ID"),
-			SecretKey: os.Getenv("COS_SECRET_KEY"),
+			SecretID:  firstNonEmptyEnv("TENCENT_CLOUD_SECRET_ID", "COS_SECRET_ID"),
+			SecretKey: firstNonEmptyEnv("TENCENT_CLOUD_SECRET_KEY", "COS_SECRET_KEY"),
 		}
 	}
 
@@ -158,4 +158,13 @@ func (b *COSBackend) BasePath() string {
 
 func (b *COSBackend) Close() error {
 	return nil
+}
+
+func firstNonEmptyEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
