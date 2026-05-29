@@ -17,11 +17,12 @@ const taskTokenClaimsKey contextKey = "task_token_claims"
 type AgentAuthMiddleware struct {
 	keyMgr          *apikey.KeyManager
 	taskTokenSecret string
+	allowStaticKey  bool
 }
 
 // NewAgentAuthMiddleware creates a new agent authentication middleware
-func NewAgentAuthMiddleware(keyMgr *apikey.KeyManager, taskTokenSecret string) *AgentAuthMiddleware {
-	return &AgentAuthMiddleware{keyMgr: keyMgr, taskTokenSecret: taskTokenSecret}
+func NewAgentAuthMiddleware(keyMgr *apikey.KeyManager, taskTokenSecret string, allowStaticKey bool) *AgentAuthMiddleware {
+	return &AgentAuthMiddleware{keyMgr: keyMgr, taskTokenSecret: taskTokenSecret, allowStaticKey: allowStaticKey}
 }
 
 // Middleware returns the authentication middleware function
@@ -43,7 +44,11 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 
 		apiKey := parts[1]
 
-		if tasktoken.LooksLike(apiKey) && a.taskTokenSecret != "" {
+		if tasktoken.LooksLike(apiKey) {
+			if a.taskTokenSecret == "" {
+				http.Error(w, "task token auth is not configured", http.StatusUnauthorized)
+				return
+			}
 			claims, err := tasktoken.Validate(a.taskTokenSecret, apiKey)
 			if err != nil {
 				http.Error(w, "invalid task token", http.StatusUnauthorized)
@@ -51,6 +56,11 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			}
 			ctx := context.WithValue(r.Context(), taskTokenClaimsKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		if !a.allowStaticKey {
+			http.Error(w, "task token required", http.StatusUnauthorized)
 			return
 		}
 

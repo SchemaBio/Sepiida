@@ -9,16 +9,18 @@ import (
 	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
+	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
 
 const defaultHTTPTimeout = 30 * time.Second
 
 // HTTPSender sends progress data to server via HTTP
 type HTTPSender struct {
-	serverURL string
-	apiKey    string
-	agentID   string
-	client    *http.Client
+	serverURL       string
+	apiKey          string
+	agentID         string
+	taskTokenSecret string
+	client          *http.Client
 }
 
 // NewHTTPSender creates a new HTTP sender
@@ -29,6 +31,13 @@ func NewHTTPSender(serverURL, apiKey, agentID string) *HTTPSender {
 		agentID:   agentID,
 		client:    &http.Client{Timeout: defaultHTTPTimeout},
 	}
+}
+
+// NewHTTPSenderWithTaskToken creates a sender that signs each write request with a per-task token.
+func NewHTTPSenderWithTaskToken(serverURL, apiKey, agentID, taskTokenSecret string) *HTTPSender {
+	s := NewHTTPSender(serverURL, apiKey, agentID)
+	s.taskTokenSecret = taskTokenSecret
+	return s
 }
 
 // SendProgress sends workflow progress to server
@@ -46,7 +55,9 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	if err := s.authorize(req, progress.UUID); err != nil {
+		return err
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -80,7 +91,9 @@ func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	if err := s.authorize(req, result.UUID); err != nil {
+		return err
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -118,7 +131,9 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	if err := s.authorize(req, uuid); err != nil {
+		return err
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -131,5 +146,18 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 		return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, string(respBody))
 	}
 
+	return nil
+}
+
+func (s *HTTPSender) authorize(req *http.Request, uuid string) error {
+	token := s.apiKey
+	if s.taskTokenSecret != "" {
+		var err error
+		token, err = tasktoken.Generate(s.taskTokenSecret, uuid, s.agentID, 24*time.Hour)
+		if err != nil {
+			return fmt.Errorf("failed to generate task token: %w", err)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
 }

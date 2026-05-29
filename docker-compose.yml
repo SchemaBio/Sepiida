@@ -53,6 +53,7 @@ services:
       - "-archive-key-id=${SEPIIDA_ARCHIVE_KEY_ID:-}"
       - "-archive-key-secret=${SEPIIDA_ARCHIVE_KEY_SECRET:-}"
       - "-archive-timeout=${SEPIIDA_ARCHIVE_TIMEOUT:-30m}"
+      - "-task-token-secret=${SEPIIDA_TASK_TOKEN_SECRET:-}"
     volumes:
       # Mount the directories the agent should watch for MiniWDL workflow outputs.
       # Each watched directory should contain UUID-named subdirectories with

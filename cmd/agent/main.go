@@ -25,6 +25,7 @@ func main() {
 	archiveKeyID := flag.String("archive-key-id", "", "access key ID for object storage (overrides env vars)")
 	archiveKeySecret := flag.String("archive-key-secret", "", "secret access key for object storage (overrides env vars)")
 	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
+	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task write tokens")
 	flag.Parse()
 
 	// Parse watch directories
@@ -34,9 +35,9 @@ func main() {
 		log.Println("Warning: using default watch directory ./output. Please specify -w for production use.")
 	}
 
-	// Validate API key
-	if *apiKey == "" {
-		log.Println("Warning: no API key specified. Please specify -key for authentication.")
+	// Validate authentication configuration
+	if *apiKey == "" && *taskTokenSecret == "" {
+		log.Println("Warning: no API key or task token secret specified. Please specify -key or -task-token-secret for authentication.")
 	}
 
 	// Parse poll interval
@@ -50,7 +51,7 @@ func main() {
 	// Create components
 	logParser := parser.NewLogParser()
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
-	httpSender := sender.NewHTTPSender(*serverURL, *apiKey, *agentID)
+	httpSender := sender.NewHTTPSenderWithTaskToken(*serverURL, *apiKey, *agentID, *taskTokenSecret)
 
 	// Create archiver if archive path is specified
 	var arch *archiver.Archiver

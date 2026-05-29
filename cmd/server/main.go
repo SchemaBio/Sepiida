@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ func main() {
 	queryKeyFile := flag.String("query-key", "", "path to query key file (keys for querying results)")
 	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
 	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task agent tokens")
+	allowStaticAgentKey := flag.Bool("allow-static-agent-key", parseBoolEnv("SEPIIDA_ALLOW_STATIC_AGENT_KEY", false), "allow static agent keys for write APIs (development/compatibility only)")
 	flag.Parse()
 
 	// Validate key files
@@ -33,6 +36,9 @@ func main() {
 	}
 	if *queryKeyFile == "" {
 		log.Fatal("Error: -query-key parameter is required. Please specify a query key file path.")
+	}
+	if *taskTokenSecret == "" && !*allowStaticAgentKey {
+		log.Fatal("Error: -task-token-secret is required unless -allow-static-agent-key=true is set for development/compatibility.")
 	}
 
 	// Initialize multi key manager
@@ -77,7 +83,7 @@ func main() {
 	progressHandler := handler.NewProgressHandler(workflowService)
 
 	// Create authentication middleware
-	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret)
+	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret, *allowStaticAgentKey)
 	queryAuth := middleware.NewQueryAuthMiddleware(mkm.GetQueryKeyManager())
 
 	// Setup routes
@@ -132,13 +138,48 @@ func main() {
 	// Start server
 	listenAddr := ":" + *port
 	log.Printf("Starting Sepiida Server on %s", listenAddr)
-	log.Printf("Database: %s", *database)
+	log.Printf("Database: %s", redactDatabaseURL(*database))
 	log.Printf("Agent Key File: %s (%d keys)", *agentKeyFile, agentKeyCount)
 	log.Printf("Query Key File: %s (%d keys)", *queryKeyFile, queryKeyCount)
+	log.Printf("Static Agent Key Writes: %t", *allowStaticAgentKey)
 
 	if err := http.ListenAndServe(listenAddr, router); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func parseBoolEnv(name string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Printf("Warning: invalid %s=%q, using %t", name, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+func redactDatabaseURL(conn string) string {
+	u, err := url.Parse(conn)
+	if err != nil || u.Scheme == "" {
+		return "<redacted>"
+	}
+	if u.User != nil {
+		username := u.User.Username()
+		if _, hasPassword := u.User.Password(); hasPassword {
+			u.User = url.UserPassword(username, "xxxxx")
+		}
+	}
+	query := u.Query()
+	for _, key := range []string{"password", "pass", "pwd"} {
+		if query.Has(key) {
+			query.Set(key, "xxxxx")
+		}
+	}
+	u.RawQuery = query.Encode()
+	return u.String()
 }
 
 func parsePostgresConn(conn string) db.Config {
