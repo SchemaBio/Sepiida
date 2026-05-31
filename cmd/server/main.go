@@ -110,8 +110,8 @@ func main() {
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "agent_keys_file: %s\nagent_keys_count: %d\nquery_keys_file: %s\nquery_keys_count: %d\nrefresh_interval: %ds\n",
-				*agentKeyFile, mkm.AgentKeyCount(), *queryKeyFile, mkm.QueryKeyCount(), *keyRefresh)
+			fmt.Fprintf(w, "agent_keys_count: %d\nquery_keys_count: %d\nrefresh_interval: %ds\n",
+				mkm.AgentKeyCount(), mkm.QueryKeyCount(), *keyRefresh)
 
 		case "/api/v1/keys/reload":
 			if r.Method != http.MethodPost {
@@ -120,8 +120,8 @@ func main() {
 			}
 			mkm.ReloadAll()
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d from %s\nQuery keys: %d from %s\n",
-				mkm.AgentKeyCount(), *agentKeyFile, mkm.QueryKeyCount(), *queryKeyFile)
+			fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d\nQuery keys: %d\n",
+				mkm.AgentKeyCount(), mkm.QueryKeyCount())
 
 		default:
 			http.NotFound(w, r)

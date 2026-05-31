@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,47 @@ func TestCollectRetriesOutputsUntilMarkedPushed(t *testing.T) {
 	}
 }
 
+func TestResolveOutputsJSONDoesNotReadOutsideExecutionDir(t *testing.T) {
+	execDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideJSON := filepath.Join(outsideDir, "secret.json")
+	writeCollectorTestFile(t, outsideJSON, `{"secret":"leaked"}`)
+
+	outputsPath := filepath.Join(execDir, "outputs.json")
+	writeCollectorTestJSON(t, outputsPath, map[string]string{"manifest": outsideJSON})
+
+	resolved, err := resolveOutputsJSON(outputsPath, execDir)
+	if err != nil {
+		t.Fatalf("resolveOutputsJSON returned error: %v", err)
+	}
+	if strings.Contains(resolved, "leaked") {
+		t.Fatalf("outside JSON content was resolved: %s", resolved)
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(resolved), &parsed); err != nil {
+		t.Fatalf("resolved outputs is not JSON: %v", err)
+	}
+	if parsed["manifest"] != outsideJSON {
+		t.Fatalf("outside path should be preserved, got %q want %q", parsed["manifest"], outsideJSON)
+	}
+}
+
+func TestReadTaskLogsRejectsOutsideExecutionDir(t *testing.T) {
+	execDir := t.TempDir()
+	outsideTaskDir := filepath.Join(t.TempDir(), "call-Outside")
+	if err := os.MkdirAll(outsideTaskDir, 0o755); err != nil {
+		t.Fatalf("failed to create outside task dir: %v", err)
+	}
+	writeCollectorTestFile(t, filepath.Join(outsideTaskDir, "stdout.txt"), "outside stdout\n")
+	writeCollectorTestFile(t, filepath.Join(outsideTaskDir, "stderr.txt"), "outside stderr\n")
+
+	stdout, stderr := readTaskLogs(outsideTaskDir, execDir)
+	if stdout != "" || stderr != "" {
+		t.Fatalf("outside task logs should not be read, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 func setupCollectorWorkflow(t *testing.T, watchDir, uuid, runName string) string {
 	t.Helper()
 
@@ -104,7 +146,9 @@ func setupCollectorWorkflow(t *testing.T, watchDir, uuid, runName string) string
 
 	writeCollectorTestFile(t, filepath.Join(taskDir, "stdout.txt"), "stdout\n")
 	writeCollectorTestFile(t, filepath.Join(taskDir, "stderr.txt"), "stderr\n")
-	writeCollectorTestFile(t, filepath.Join(execDir, "outputs.json"), `{"bam":"`+filepath.Join(execDir, "result.bam")+`"}`)
+	writeCollectorTestJSON(t, filepath.Join(execDir, "outputs.json"), map[string]string{
+		"bam": filepath.Join(execDir, "result.bam"),
+	})
 	writeCollectorTestFile(t, filepath.Join(execDir, "result.bam"), "bam")
 	writeCollectorTestFile(t, filepath.Join(execDir, "workflow.log"),
 		`2026-04-28 09:49:55.697 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "workflow.wdl", dir: "`+execDir+`"`+"\n"+
@@ -113,11 +157,21 @@ func setupCollectorWorkflow(t *testing.T, watchDir, uuid, runName string) string
 			`2026-04-28 09:50:00.334 wdl.w:SingleWES.t:call-CreateMitoBed NOTICE docker task exit :: state: "complete", exit_code: 0`+"\n"+
 			`2026-04-28 10:20:05.417 wdl.w:SingleWES NOTICE done`+"\n")
 
-	if err := os.Symlink(runName, filepath.Join(uuidDir, "_LAST")); err != nil {
-		t.Fatalf("failed to create _LAST symlink: %v", err)
+	lastPath := filepath.Join(uuidDir, "_LAST")
+	if err := os.Symlink(runName, lastPath); err != nil {
+		writeCollectorTestFile(t, lastPath, runName)
 	}
 
 	return execDir
+}
+
+func writeCollectorTestJSON(t *testing.T, path string, value interface{}) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("failed to marshal %s: %v", path, err)
+	}
+	writeCollectorTestFile(t, path, string(data))
 }
 
 func writeCollectorTestFile(t *testing.T, path string, data string) {

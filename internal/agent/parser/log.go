@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -39,8 +40,7 @@ func (p *LogParser) ParseWorkflowStart(line string) (*model.Workflow, error) {
 
 	// Extract workflow ID from directory name
 	dir := matches[5]
-	parts := strings.Split(dir, "/")
-	workflowID := parts[len(parts)-1]
+	workflowID := filepath.Base(filepath.Clean(dir))
 	p.workflowID = workflowID
 
 	workflow := &model.Workflow{

@@ -49,3 +49,8 @@ query-keys.txt
 query-keys
 keys.txt
 keys
+
+.codex*
+.agents/
+.gocache/
+.gotmp/

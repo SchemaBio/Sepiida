@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SchemaBio/Sepiida/internal/agent/pathsafe"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
 
@@ -121,6 +122,11 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 		KeyPrefix:          uuid,
 	}
 
+	executionDir, err := pathsafe.RealPath(executionDir)
+	if err != nil {
+		return result, fmt.Errorf("invalid execution directory: %w", err)
+	}
+
 	// 1. Archive workflow.log
 	logPath := filepath.Join(executionDir, "workflow.log")
 	if err := a.archiveFile(ctx, uuid, executionDir, logPath); err != nil {
@@ -146,7 +152,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	}
 
 	// 4. Resolve outputs.json (recursive tmp file resolution only, preserve original paths)
-	resolvedJSON, pathMap, err := resolveOutputs(outputsPath)
+	resolvedJSON, pathMap, err := resolveOutputs(outputsPath, executionDir)
 	if err != nil {
 		log.Printf("Warning: failed to resolve outputs.json for %s: %v", uuid, err)
 		result.ArchivedCount = archived
@@ -191,7 +197,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 			continue
 		}
 
-		realPath, err := filepath.EvalSymlinks(origPath)
+		realPath, err := pathsafe.ResolveExistingWithin(executionDir, origPath)
 		if err != nil {
 			log.Printf("Warning: failed to resolve symlink %s: %v", origPath, err)
 			continue
@@ -207,7 +213,12 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	// 6. Convert each text file to individual Parquet file with dynamic schema
 	for _, textFile := range textFiles {
 		parquetKey := pathMap[textFile]
-		if err := a.archiveSingleParquet(ctx, textFile, parquetKey); err != nil {
+		realPath, err := pathsafe.ResolveExistingWithin(executionDir, textFile)
+		if err != nil {
+			log.Printf("Warning: failed to resolve text file %s: %v", textFile, err)
+			continue
+		}
+		if err := a.archiveSingleParquet(ctx, realPath, parquetKey); err != nil {
 			log.Printf("Warning: failed to archive parquet for %s: %v", textFile, err)
 			continue
 		}
@@ -262,8 +273,13 @@ func (a *Archiver) uploadRewrittenOutputs(ctx context.Context, uuid string, reso
 // (tmp files). Symlinks are NOT resolved here — original paths are preserved so
 // that archive keys (relative to execDir) can be computed correctly.
 // Returns the resolved JSON structure and a map from original path → archive key.
-func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) {
-	data, err := os.ReadFile(outputsPath)
+func resolveOutputs(outputsPath string, executionDir string) (interface{}, map[string]string, error) {
+	outputsRealPath, err := pathsafe.ResolveExistingWithin(executionDir, outputsPath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	data, err := os.ReadFile(outputsRealPath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -274,12 +290,11 @@ func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) 
 	}
 
 	// Only resolve JSON tmp files, preserve original symlink paths
-	resolved := resolveJSONFiles(raw)
+	resolved := resolveJSONFiles(raw, executionDir)
 
 	// Collect file paths and compute flattened archive keys (basename only)
 	pathMap := make(map[string]string)
-	execDir := filepath.Dir(outputsPath)
-	collectPathsFlat(resolved, execDir, pathMap)
+	collectPathsFlat(resolved, executionDir, pathMap)
 
 	return resolved, pathMap, nil
 }
@@ -287,18 +302,18 @@ func resolveOutputs(outputsPath string) (interface{}, map[string]string, error) 
 // resolveJSONFiles recursively resolves a JSON value: if a string is a file path
 // whose content is valid JSON, read and replace with the parsed content.
 // Does NOT resolve symlinks — original paths are preserved.
-func resolveJSONFiles(v interface{}) interface{} {
+func resolveJSONFiles(v interface{}, executionDir string) interface{} {
 	switch val := v.(type) {
 	case string:
-		return resolveJSONFile(val)
+		return resolveJSONFile(val, executionDir)
 	case map[string]interface{}:
 		for k, child := range val {
-			val[k] = resolveJSONFiles(child)
+			val[k] = resolveJSONFiles(child, executionDir)
 		}
 		return val
 	case []interface{}:
 		for i, child := range val {
-			val[i] = resolveJSONFiles(child)
+			val[i] = resolveJSONFiles(child, executionDir)
 		}
 		return val
 	default:
@@ -309,13 +324,12 @@ func resolveJSONFiles(v interface{}) interface{} {
 // resolveJSONFile checks if a string is a path to a JSON file and resolves it.
 // Symlinks are resolved only to read the file content; the original path string
 // is returned if the file is not JSON.
-func resolveJSONFile(s string) interface{} {
-	if len(s) == 0 || s[0] != '/' || strings.Contains(s, "://") {
+func resolveJSONFile(s string, executionDir string) interface{} {
+	if !pathsafe.IsAbsoluteLocalPath(s) {
 		return s
 	}
 
-	// Need to resolve symlinks to check if the file exists and read it
-	realPath, err := filepath.EvalSymlinks(s)
+	realPath, err := pathsafe.ResolveExistingWithin(executionDir, s)
 	if err != nil {
 		return s
 	}
@@ -337,7 +351,7 @@ func resolveJSONFile(s string) interface{} {
 
 	// It's a JSON file — recursively resolve its contents
 	log.Printf("Resolved outputs reference: %s", s)
-	return resolveJSONFiles(parsed)
+	return resolveJSONFiles(parsed, executionDir)
 }
 
 // collectPathsFlat collects all file paths from the resolved JSON structure,
@@ -346,7 +360,7 @@ func resolveJSONFile(s string) interface{} {
 func collectPathsFlat(v interface{}, execDir string, pathMap map[string]string) {
 	// Step 1: Collect all valid file paths
 	var allPaths []string
-	collectAllPaths(v, &allPaths)
+	collectAllPaths(v, execDir, &allPaths)
 
 	// Step 2: Generate flattened archive keys with conflict resolution
 	usedKeys := make(map[string]int)
@@ -367,24 +381,28 @@ func collectPathsFlat(v interface{}, execDir string, pathMap map[string]string) 
 }
 
 // collectAllPaths recursively collects all valid file paths from the JSON structure.
-func collectAllPaths(v interface{}, paths *[]string) {
+func collectAllPaths(v interface{}, execDir string, paths *[]string) {
 	switch val := v.(type) {
 	case string:
-		if len(val) == 0 || val[0] != '/' || strings.Contains(val, "://") {
+		if !pathsafe.IsAbsoluteLocalPath(val) {
 			return
 		}
-		// Check that the file actually exists (possibly via symlink)
-		if _, err := os.Stat(val); err != nil {
+		realPath, err := pathsafe.ResolveExistingWithin(execDir, val)
+		if err != nil {
+			return
+		}
+		info, err := os.Stat(realPath)
+		if err != nil || info.IsDir() {
 			return
 		}
 		*paths = append(*paths, val)
 	case map[string]interface{}:
 		for _, child := range val {
-			collectAllPaths(child, paths)
+			collectAllPaths(child, execDir, paths)
 		}
 	case []interface{}:
 		for _, child := range val {
-			collectAllPaths(child, paths)
+			collectAllPaths(child, execDir, paths)
 		}
 	}
 }
@@ -394,7 +412,7 @@ func collectAllPaths(v interface{}, paths *[]string) {
 func rewritePaths(v interface{}, pathMap map[string]string, basePath string) interface{} {
 	switch val := v.(type) {
 	case string:
-		if len(val) == 0 || val[0] != '/' || strings.Contains(val, "://") {
+		if !pathsafe.IsAbsoluteLocalPath(val) {
 			return val
 		}
 		if key, ok := pathMap[val]; ok {
@@ -430,12 +448,17 @@ func (a *Archiver) archiveSingleParquet(ctx context.Context, textFilePath string
 
 // archiveFile uploads a single file, preserving its path relative to executionDir.
 func (a *Archiver) archiveFile(ctx context.Context, uuid string, executionDir string, filePath string) error {
-	info, err := os.Stat(filePath)
+	realPath, err := pathsafe.ResolveExistingWithin(executionDir, filePath)
+	if err != nil {
+		return fmt.Errorf("invalid archive path: %w", err)
+	}
+
+	info, err := os.Stat(realPath)
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
 	}
 
-	f, err := os.Open(filePath)
+	f, err := os.Open(realPath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}

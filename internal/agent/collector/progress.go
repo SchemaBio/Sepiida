@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
+	"github.com/SchemaBio/Sepiida/internal/agent/pathsafe"
 	"github.com/SchemaBio/Sepiida/internal/agent/state"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
@@ -84,7 +86,7 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 
 		// Check if _LAST symlink exists
 		lastSymlink := filepath.Join(uuidDir, "_LAST")
-		executionDir, err := resolveSymlink(lastSymlink)
+		executionDir, err := resolveSymlink(lastSymlink, uuidDir)
 		if err != nil {
 			// No _LAST symlink, skip this UUID
 			continue
@@ -113,7 +115,7 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		for i, task := range tasks {
 			task.UUID = uuid
 			if task.OutputDir != "" {
-				stdout, stderr := readTaskLogs(task.OutputDir)
+				stdout, stderr := readTaskLogs(task.OutputDir, executionDir)
 				tasks[i].Stdout = stdout
 				tasks[i].Stderr = stderr
 			}
@@ -128,7 +130,7 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		// not pushed outputs yet. A UUID can point _LAST at a new execution.
 		if workflow.Status == model.WorkflowStatusSuccess && (!sameExecution || !prevState.OutputsPushed) {
 			outputsFile := filepath.Join(executionDir, "outputs.json")
-			if resolved, err := resolveOutputsJSON(outputsFile); err == nil {
+			if resolved, err := resolveOutputsJSON(outputsFile, executionDir); err == nil {
 				workflow.OutputsJSON = resolved
 			}
 		}
@@ -171,30 +173,46 @@ func isValidUUID(s string) bool {
 	return uuidPattern.MatchString(s)
 }
 
-// resolveSymlink resolves a symlink to its target path
-func resolveSymlink(symlinkPath string) (string, error) {
+// resolveSymlink resolves a _LAST link, directory, or file pointer to a
+// concrete execution directory that must stay inside rootDir.
+func resolveSymlink(symlinkPath string, rootDir string) (string, error) {
 	info, err := os.Lstat(symlinkPath)
 	if err != nil {
 		return "", err
 	}
 
-	if info.Mode()&os.ModeSymlink == 0 {
-		// Not a symlink, return the path itself
-		return symlinkPath, nil
+	target := symlinkPath
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err = os.Readlink(symlinkPath)
+		if err != nil {
+			return "", err
+		}
+	} else if !info.IsDir() {
+		data, err := os.ReadFile(symlinkPath)
+		if err != nil {
+			return "", err
+		}
+		target = strings.TrimSpace(string(data))
+		if target == "" {
+			return "", fmt.Errorf("_LAST file is empty")
+		}
 	}
 
-	target, err := os.Readlink(symlinkPath)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(symlinkPath), target)
+	}
+
+	executionDir, err := pathsafe.ResolveExistingWithin(rootDir, target)
 	if err != nil {
 		return "", err
 	}
-
-	// If target is relative, make it absolute
-	if !filepath.IsAbs(target) {
-		base := filepath.Dir(symlinkPath)
-		target = filepath.Join(base, target)
+	if info, err := os.Stat(executionDir); err != nil || !info.IsDir() {
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("_LAST target is not a directory")
 	}
-
-	return target, nil
+	return executionDir, nil
 }
 
 // MarkOutputsPushed marks that outputs.json has been successfully pushed
@@ -212,16 +230,21 @@ func (c *ProgressCollector) MarkArchived(uuidDir string) error {
 	return c.stateMgr.MarkArchived(uuidDir)
 }
 
-// readTaskLogs reads stdout and stderr from task directory
-func readTaskLogs(dir string) (string, string) {
+// readTaskLogs reads stdout and stderr from task directory.
+func readTaskLogs(dir string, executionDir string) (string, string) {
 	var stdout, stderr string
 
-	stdoutFile := filepath.Join(dir, "stdout.txt")
+	taskDir, err := pathsafe.ResolveExistingWithin(executionDir, dir)
+	if err != nil {
+		return stdout, stderr
+	}
+
+	stdoutFile := filepath.Join(taskDir, "stdout.txt")
 	if data, err := os.ReadFile(stdoutFile); err == nil {
 		stdout = string(data)
 	}
 
-	stderrFile := filepath.Join(dir, "stderr.txt")
+	stderrFile := filepath.Join(taskDir, "stderr.txt")
 	if data, err := os.ReadFile(stderrFile); err == nil {
 		stderr = string(data)
 	}
@@ -233,13 +256,18 @@ func readTaskLogs(dir string) (string, string) {
 // If a value is an absolute path to an existing file whose content is valid JSON,
 // the value is replaced with the parsed JSON content. This handles the case where
 // outputs.json points to a tmp file that contains the actual output manifest.
-func resolveOutputsJSON(outputsPath string) (string, error) {
-	data, err := os.ReadFile(outputsPath)
+func resolveOutputsJSON(outputsPath string, executionDir string) (string, error) {
+	outputsRealPath, err := pathsafe.ResolveExistingWithin(executionDir, outputsPath)
 	if err != nil {
 		return "", err
 	}
 
-	resolved, changed := resolveJSONValues(data)
+	data, err := os.ReadFile(outputsRealPath)
+	if err != nil {
+		return "", err
+	}
+
+	resolved, changed := resolveJSONValues(data, executionDir)
 	if !changed {
 		return string(data), nil
 	}
@@ -255,24 +283,24 @@ func resolveOutputsJSON(outputsPath string) (string, error) {
 // resolveJSONValues walks a parsed JSON structure and replaces any string value
 // that is a file path pointing to a JSON file with the parsed content of that file.
 // Returns the resolved value and whether any substitution was made.
-func resolveJSONValues(data []byte) (interface{}, bool) {
+func resolveJSONValues(data []byte, executionDir string) (interface{}, bool) {
 	var raw interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, false
 	}
 
-	return resolveValue(raw)
+	return resolveValue(raw, executionDir)
 }
 
 // resolveValue recursively resolves a JSON value.
-func resolveValue(v interface{}) (interface{}, bool) {
+func resolveValue(v interface{}, executionDir string) (interface{}, bool) {
 	switch val := v.(type) {
 	case string:
-		return resolveString(val)
+		return resolveString(val, executionDir)
 	case map[string]interface{}:
 		changed := false
 		for k, child := range val {
-			resolved, childChanged := resolveValue(child)
+			resolved, childChanged := resolveValue(child, executionDir)
 			if childChanged {
 				val[k] = resolved
 				changed = true
@@ -282,7 +310,7 @@ func resolveValue(v interface{}) (interface{}, bool) {
 	case []interface{}:
 		changed := false
 		for i, child := range val {
-			resolved, childChanged := resolveValue(child)
+			resolved, childChanged := resolveValue(child, executionDir)
 			if childChanged {
 				val[i] = resolved
 				changed = true
@@ -297,20 +325,15 @@ func resolveValue(v interface{}) (interface{}, bool) {
 // resolveString checks if a string is a file path and resolves it.
 // For all file paths: symlinks are resolved to real paths.
 // For JSON files: content is parsed and recursively resolved.
-func resolveString(s string) (interface{}, bool) {
-	if len(s) == 0 || s[0] != '/' {
-		return s, false
-	}
-	if strings.Contains(s, "://") {
+func resolveString(s string, executionDir string) (interface{}, bool) {
+	if !pathsafe.IsAbsoluteLocalPath(s) {
 		return s, false
 	}
 
-	// Resolve symlinks to real path
-	realPath, err := filepath.EvalSymlinks(s)
+	realPath, err := pathsafe.ResolveExistingWithin(executionDir, s)
 	if err != nil {
 		return s, false
 	}
-	realPath = filepath.Clean(realPath)
 
 	info, err := os.Stat(realPath)
 	if err != nil || info.IsDir() {
@@ -342,7 +365,7 @@ func resolveString(s string) (interface{}, bool) {
 	}
 
 	// JSON file — recursively resolve its contents
-	resolved, _ := resolveValue(parsed)
+	resolved, _ := resolveValue(parsed, executionDir)
 	log.Printf("Resolved outputs reference: %s -> %s", s, realPath)
 	return resolved, true
 }

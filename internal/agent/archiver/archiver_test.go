@@ -2,6 +2,7 @@ package archiver
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,7 +37,7 @@ func TestArchiveReturnsManifest(t *testing.T) {
 	mustWrite(t, filepath.Join(dir, "workflow.log"), "workflow log")
 	mustWrite(t, filepath.Join(dir, "inputs.json"), `{"input":"value"}`)
 	mustWrite(t, outputFile, "bam data")
-	mustWrite(t, filepath.Join(dir, "outputs.json"), `{"bam":"`+outputFile+`"}`)
+	mustWriteJSON(t, filepath.Join(dir, "outputs.json"), map[string]string{"bam": outputFile})
 
 	backend := &memoryBackend{
 		basePath: "https://storage.example/archive",
@@ -87,7 +88,7 @@ func TestNewFromPathSupportsLocalArchive(t *testing.T) {
 	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
 	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
 	mustWrite(t, outputFile, "bam data")
-	mustWrite(t, filepath.Join(executionDir, "outputs.json"), `{"bam":"`+outputFile+`"}`)
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{"bam": outputFile})
 
 	archiver, err := NewFromPath(archiveDir, "", "")
 	if err != nil {
@@ -123,6 +124,89 @@ func TestLocalBackendRejectsEscapingKeys(t *testing.T) {
 	if err := backend.Upload(context.Background(), "../escape.txt", strings.NewReader("bad"), 3); err == nil {
 		t.Fatal("expected escaping key to be rejected")
 	}
+}
+
+func TestArchiveIgnoresOutputPathsOutsideExecutionDir(t *testing.T) {
+	ctx := context.Background()
+	executionDir := t.TempDir()
+	outsideDir := t.TempDir()
+	uuid := "sample-uuid"
+	insideFile := filepath.Join(executionDir, "result.bam")
+	outsideFile := filepath.Join(outsideDir, "secret.bam")
+
+	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
+	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
+	mustWrite(t, insideFile, "bam data")
+	mustWrite(t, outsideFile, "secret data")
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{
+		"inside":  insideFile,
+		"outside": outsideFile,
+	})
+
+	backend := &memoryBackend{
+		basePath: "https://storage.example/archive",
+		uploads:  make(map[string]string),
+	}
+	archiver := NewArchiver(backend)
+
+	result, err := archiver.ArchiveWorkflow(ctx, uuid, "run-1", executionDir)
+	if err != nil {
+		t.Fatalf("ArchiveWorkflow returned error: %v", err)
+	}
+	if result.ArchivedCount != 5 {
+		t.Fatalf("unexpected archived count: got %d uploads=%v", result.ArchivedCount, backend.uploads)
+	}
+	if _, ok := backend.uploads[uuid+"/secret.bam"]; ok {
+		t.Fatalf("outside output file was archived: uploads=%v", backend.uploads)
+	}
+
+	rewritten := backend.uploads[result.OutputsResolvedKey]
+	if strings.Contains(rewritten, backend.basePath+"/"+uuid+"/secret.bam") {
+		t.Fatalf("outside output path was rewritten to archive path: %s", rewritten)
+	}
+	var rewrittenJSON map[string]string
+	if err := json.Unmarshal([]byte(rewritten), &rewrittenJSON); err != nil {
+		t.Fatalf("rewritten outputs is not JSON: %v", err)
+	}
+	if rewrittenJSON["outside"] != outsideFile {
+		t.Fatalf("outside output path should remain unchanged: got %q want %q", rewrittenJSON["outside"], outsideFile)
+	}
+}
+
+func TestResolveOutputsDoesNotReadJSONOutsideExecutionDir(t *testing.T) {
+	executionDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideJSON := filepath.Join(outsideDir, "secret.json")
+
+	mustWrite(t, outsideJSON, `{"secret":"leaked"}`)
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{
+		"manifest": outsideJSON,
+	})
+
+	resolved, pathMap, err := resolveOutputs(filepath.Join(executionDir, "outputs.json"), executionDir)
+	if err != nil {
+		t.Fatalf("resolveOutputs returned error: %v", err)
+	}
+	if len(pathMap) != 0 {
+		t.Fatalf("outside JSON should not be collected, got pathMap=%v", pathMap)
+	}
+
+	data, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatalf("failed to marshal resolved outputs: %v", err)
+	}
+	if strings.Contains(string(data), "leaked") {
+		t.Fatalf("outside JSON content was resolved: %s", data)
+	}
+}
+
+func mustWriteJSON(t *testing.T, path string, value interface{}) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("failed to marshal %s: %v", path, err)
+	}
+	mustWrite(t, path, string(data))
 }
 
 func mustWrite(t *testing.T, path string, data string) {
