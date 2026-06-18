@@ -103,6 +103,10 @@ func main() {
 
 	// Keys management API - use query auth (requires query key to access)
 	keysHandler := func(w http.ResponseWriter, r *http.Request) {
+		if scope, ok := middleware.QueryKeyScope(r.Context()); ok && scope.Restricted() {
+			http.Error(w, "query key scope does not allow key management", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/v1/keys/status":
 			if r.Method != http.MethodGet {
@@ -143,7 +147,16 @@ func main() {
 	log.Printf("Query Key File: %s (%d keys)", *queryKeyFile, queryKeyCount)
 	log.Printf("Static Agent Key Writes: %t", *allowStaticAgentKey)
 
-	if err := http.ListenAndServe(listenAddr, router); err != nil {
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

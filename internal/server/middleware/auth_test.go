@@ -93,3 +93,35 @@ func TestQueryAuthAcceptsQueryKey(t *testing.T) {
 		t.Fatalf("expected query key to pass, status=%d called=%t body=%s", rec.Code, nextCalled, rec.Body.String())
 	}
 }
+
+func TestQueryAuthSetsScopedKeyContext(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(keyFile, []byte("query-key uuid=workflow-uuid\n"), 0o644); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+	keyMgr := apikey.NewKeyManager(keyFile)
+	if err := keyMgr.Reload(); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	middleware := NewQueryAuthMiddleware(keyMgr)
+	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope, ok := QueryKeyScope(r.Context())
+		if !ok {
+			t.Fatal("expected query scope in request context")
+		}
+		if !scope.Restricted() || !scope.AllowsWorkflow("", "workflow-uuid") {
+			t.Fatalf("unexpected query scope: %+v", scope)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow?uuid=workflow-uuid", nil)
+	req.Header.Set("Authorization", "Bearer query-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected query key to pass, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

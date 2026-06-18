@@ -306,6 +306,17 @@ curl -H "Authorization: Bearer my-query-key-001" \
 - 查询用户只能查看结果，不能推送
 - 两类Key分开管理，安全性更高
 
+Query Key 默认兼容旧格式，每行一个 key，拥有全量查询权限。生产环境建议使用 scoped query key，将 key 限定到具体 workflow UUID 或 workflow ID：
+
+```text
+# 全量查询权限
+my-query-key-001
+
+# 只允许查询指定 workflow UUID / workflow ID；不能调用 /api/v1/workflows 或 key 管理接口
+my-scoped-query-key uuid=workflow-uuid-1,workflow-uuid-2
+my-workflow-query-key workflow=workflow-id-1
+```
+
 ## Key动态刷新
 
 - Server定时检查Key文件修改时间

@@ -12,16 +12,46 @@ import (
 // KeyManager manages API keys from a dynamic key file
 type KeyManager struct {
 	keyFile     string
-	keys        map[string]bool
+	keys        map[string]KeyScope
 	mu          sync.RWMutex
 	lastModTime time.Time
+}
+
+// KeyScope describes which query resources a key may read.
+type KeyScope struct {
+	Unrestricted bool
+	WorkflowIDs  map[string]struct{}
+	UUIDs        map[string]struct{}
+}
+
+// AllowsWorkflow checks whether a scope permits a concrete workflow.
+func (s KeyScope) AllowsWorkflow(workflowID, uuid string) bool {
+	if s.Unrestricted {
+		return true
+	}
+	if workflowID != "" {
+		if _, ok := s.WorkflowIDs[workflowID]; ok {
+			return true
+		}
+	}
+	if uuid != "" {
+		if _, ok := s.UUIDs[uuid]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Restricted returns true when a key has a scoped allow-list.
+func (s KeyScope) Restricted() bool {
+	return !s.Unrestricted
 }
 
 // NewKeyManager creates a new key manager
 func NewKeyManager(keyFile string) *KeyManager {
 	return &KeyManager{
 		keyFile: keyFile,
-		keys:    make(map[string]bool),
+		keys:    make(map[string]KeyScope),
 	}
 }
 
@@ -70,7 +100,7 @@ func (km *KeyManager) loadKeys() {
 	}
 	defer file.Close()
 
-	newKeys := make(map[string]bool)
+	newKeys := make(map[string]KeyScope)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -78,7 +108,11 @@ func (km *KeyManager) loadKeys() {
 		if line == "" || (len(line) > 0 && line[0] == '#') {
 			continue
 		}
-		newKeys[line] = true
+		key, scope := parseKeyLine(line)
+		if key == "" {
+			continue
+		}
+		newKeys[key] = scope
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -96,7 +130,16 @@ func (km *KeyManager) loadKeys() {
 func (km *KeyManager) Validate(key string) bool {
 	km.mu.RLock()
 	defer km.mu.RUnlock()
-	return km.keys[key]
+	_, ok := km.keys[key]
+	return ok
+}
+
+// Scope returns the scope associated with a key.
+func (km *KeyManager) Scope(key string) (KeyScope, bool) {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	scope, ok := km.keys[key]
+	return scope, ok
 }
 
 // List returns all valid keys
@@ -109,6 +152,53 @@ func (km *KeyManager) List() []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+func parseKeyLine(line string) (string, KeyScope) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", KeyScope{}
+	}
+
+	scope := KeyScope{Unrestricted: true}
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "workflow", "workflow_id":
+			scope.Unrestricted = false
+			if scope.WorkflowIDs == nil {
+				scope.WorkflowIDs = make(map[string]struct{})
+			}
+			for _, id := range splitScopeValues(value) {
+				scope.WorkflowIDs[id] = struct{}{}
+			}
+		case "uuid":
+			scope.Unrestricted = false
+			if scope.UUIDs == nil {
+				scope.UUIDs = make(map[string]struct{})
+			}
+			for _, uuid := range splitScopeValues(value) {
+				scope.UUIDs[uuid] = struct{}{}
+			}
+		}
+	}
+
+	return fields[0], scope
+}
+
+func splitScopeValues(value string) []string {
+	rawValues := strings.Split(value, ",")
+	values := make([]string, 0, len(rawValues))
+	for _, raw := range rawValues {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }
 
 // Count returns the number of valid keys

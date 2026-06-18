@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -19,6 +20,7 @@ type ProgressHandler struct {
 const (
 	defaultWorkflowListLimit = 100
 	maxWorkflowListLimit     = 500
+	maxJSONBodyBytes         = 10 << 20
 )
 
 // NewProgressHandler creates a new progress handler
@@ -34,8 +36,7 @@ func (h *ProgressHandler) HandleProgress(w http.ResponseWriter, r *http.Request)
 	}
 
 	var progress model.WorkflowProgress
-	if err := json.NewDecoder(r.Body).Decode(&progress); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &progress) {
 		return
 	}
 
@@ -64,8 +65,7 @@ func (h *ProgressHandler) HandleOutput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req model.WorkflowOutputRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -119,6 +119,9 @@ func (h *ProgressHandler) HandleGetWorkflow(w http.ResponseWriter, r *http.Reque
 		json.NewEncoder(w).Encode(map[string]string{"error": "workflow not found"})
 		return
 	}
+	if !authorizeQueryWorkflow(w, r, workflow) {
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]interface{}{"workflow": workflow})
@@ -134,6 +137,9 @@ func (h *ProgressHandler) HandleGetWorkflowTasks(w http.ResponseWriter, r *http.
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "missing workflow id", http.StatusBadRequest)
+		return
+	}
+	if !h.authorizeQueryWorkflowID(w, r, id) {
 		return
 	}
 
@@ -158,8 +164,7 @@ func (h *ProgressHandler) HandleArchive(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req model.ArchiveResult
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if req.UUID == "" {
@@ -197,10 +202,67 @@ func authorizeTaskToken(w http.ResponseWriter, r *http.Request, uuid, agentID st
 	return true
 }
 
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func authorizeQueryWorkflow(w http.ResponseWriter, r *http.Request, workflow *model.Workflow) bool {
+	scope, ok := middleware.QueryKeyScope(r.Context())
+	if !ok || !scope.Restricted() || workflow == nil {
+		return true
+	}
+	if scope.AllowsWorkflow(workflow.ID, workflow.UUID) {
+		return true
+	}
+	http.Error(w, "query key scope does not allow this workflow", http.StatusForbidden)
+	return false
+}
+
+func (h *ProgressHandler) authorizeQueryList(w http.ResponseWriter, r *http.Request) bool {
+	scope, ok := middleware.QueryKeyScope(r.Context())
+	if !ok || !scope.Restricted() {
+		return true
+	}
+	http.Error(w, "query key scope does not allow listing workflows", http.StatusForbidden)
+	return false
+}
+
+func (h *ProgressHandler) authorizeQueryWorkflowID(w http.ResponseWriter, r *http.Request, workflowID string) bool {
+	scope, ok := middleware.QueryKeyScope(r.Context())
+	if !ok || !scope.Restricted() || scope.AllowsWorkflow(workflowID, "") {
+		return true
+	}
+
+	workflow, err := h.service.GetWorkflow(r.Context(), workflowID)
+	if err != nil {
+		http.Error(w, "failed to get workflow", http.StatusInternalServerError)
+		return false
+	}
+	if workflow != nil && scope.AllowsWorkflow(workflow.ID, workflow.UUID) {
+		return true
+	}
+
+	http.Error(w, "query key scope does not allow this workflow", http.StatusForbidden)
+	return false
+}
+
 // HandleListWorkflows handles GET /api/v1/workflows
 func (h *ProgressHandler) HandleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.authorizeQueryList(w, r) {
 		return
 	}
 

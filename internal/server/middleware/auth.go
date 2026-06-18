@@ -11,7 +11,10 @@ import (
 
 type contextKey string
 
-const taskTokenClaimsKey contextKey = "task_token_claims"
+const (
+	taskTokenClaimsKey contextKey = "task_token_claims"
+	queryScopeKey      contextKey = "query_scope"
+)
 
 // AgentAuthMiddleware provides API key authentication for agent operations (push data)
 type AgentAuthMiddleware struct {
@@ -81,6 +84,12 @@ func TaskTokenClaims(ctx context.Context) (*tasktoken.Claims, bool) {
 	return claims, ok
 }
 
+// QueryKeyScope returns the scope attached to a validated query API key.
+func QueryKeyScope(ctx context.Context) (apikey.KeyScope, bool) {
+	scope, ok := ctx.Value(queryScopeKey).(apikey.KeyScope)
+	return scope, ok
+}
+
 // QueryAuthMiddleware provides API key authentication for query operations
 type QueryAuthMiddleware struct {
 	keyMgr *apikey.KeyManager
@@ -111,13 +120,15 @@ func (q *QueryAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		apiKey := parts[1]
 
 		// Validate API key using query key manager
-		if !q.keyMgr.Validate(apiKey) {
+		scope, ok := q.keyMgr.Scope(apiKey)
+		if !ok {
 			http.Error(w, "invalid query api key", http.StatusUnauthorized)
 			return
 		}
 
 		// Add API key to context for later use
 		ctx := context.WithValue(r.Context(), "api_key", apiKey)
+		ctx = context.WithValue(ctx, queryScopeKey, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

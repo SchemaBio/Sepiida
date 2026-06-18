@@ -4,9 +4,13 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
+	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
 )
 
@@ -25,6 +29,32 @@ func TestHandleListWorkflowsCapsLimit(t *testing.T) {
 	}
 	if fake.lastListLimit != maxWorkflowListLimit {
 		t.Fatalf("expected limit to be capped at %d, got %d", maxWorkflowListLimit, fake.lastListLimit)
+	}
+}
+
+func TestHandleListWorkflowsRejectsScopedQueryKey(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(keyFile, []byte("scoped-key uuid=workflow-uuid\n"), 0o644); err != nil {
+		t.Fatalf("failed to write key file: %v", err)
+	}
+	keyMgr := apikey.NewKeyManager(keyFile)
+	if err := keyMgr.Reload(); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	fake := &listLimitDB{}
+	svc := service.NewWorkflowService(fake)
+	handler := NewProgressHandler(svc)
+	authenticated := middleware.NewQueryAuthMiddleware(keyMgr).Middleware(http.HandlerFunc(handler.HandleListWorkflows))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflows", nil)
+	req.Header.Set("Authorization", "Bearer scoped-key")
+	rec := httptest.NewRecorder()
+
+	authenticated.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for scoped list, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
