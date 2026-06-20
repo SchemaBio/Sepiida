@@ -16,7 +16,7 @@ import (
 
 func main() {
 	// Command line flags
-	serverURL := flag.String("s", "http://localhost:8080", "server URL")
+	serverURL := flag.String("s", "http://localhost:9090", "server URL")
 	apiKey := flag.String("key", "", "API key for authentication")
 	agentID := flag.String("id", "agent-001", "agent identifier")
 	interval := flag.Int("i", 60, "poll interval in seconds")

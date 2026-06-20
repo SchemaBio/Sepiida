@@ -29,6 +29,11 @@ WORKDIR /app
 
 EXPOSE 9090
 
+# Default key file locations — operators just have to mount key files at these
+# paths (or override SEPIIDA_*_KEY_FILE) instead of also overriding the CMD.
+ENV SEPIIDA_AGENT_KEY_FILE=/etc/sepiida/keys/agent-keys.txt \
+    SEPIIDA_QUERY_KEY_FILE=/etc/sepiida/keys/query-keys.txt
+
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
   CMD wget -q --spider http://localhost:9090/health || exit 1
 

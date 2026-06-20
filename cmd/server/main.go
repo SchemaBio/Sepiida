@@ -21,10 +21,13 @@ import (
 
 func main() {
 	// Command line flags
-	port := flag.String("p", "8080", "server listen port")
+	port := flag.String("p", "9090", "server listen port")
 	database := flag.String("d", "postgres://localhost:5432/sepiida?user=postgres&password=postgres", "database connection string (postgres://host:port/db?user=xxx&password=xxx)")
-	agentKeyFile := flag.String("agent-key", "", "path to agent key file (keys for pushing data)")
-	queryKeyFile := flag.String("query-key", "", "path to query key file (keys for querying results)")
+	// Key files default from env so containers can supply them via env vars
+	// instead of being forced to override the entrypoint with explicit flags.
+	// Precedence: CLI flag > env var > "" (which we still validate as required).
+	agentKeyFile := flag.String("agent-key", os.Getenv("SEPIIDA_AGENT_KEY_FILE"), "path to agent key file (keys for pushing data); env: SEPIIDA_AGENT_KEY_FILE")
+	queryKeyFile := flag.String("query-key", os.Getenv("SEPIIDA_QUERY_KEY_FILE"), "path to query key file (keys for querying results); env: SEPIIDA_QUERY_KEY_FILE")
 	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
 	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task agent tokens")
 	allowStaticAgentKey := flag.Bool("allow-static-agent-key", parseBoolEnv("SEPIIDA_ALLOW_STATIC_AGENT_KEY", false), "allow static agent keys for write APIs (development/compatibility only)")
@@ -32,10 +35,10 @@ func main() {
 
 	// Validate key files
 	if *agentKeyFile == "" {
-		log.Fatal("Error: -agent-key parameter is required. Please specify an agent key file path.")
+		log.Fatal("Error: -agent-key (or SEPIIDA_AGENT_KEY_FILE env) is required. Please specify an agent key file path.")
 	}
 	if *queryKeyFile == "" {
-		log.Fatal("Error: -query-key parameter is required. Please specify a query key file path.")
+		log.Fatal("Error: -query-key (or SEPIIDA_QUERY_KEY_FILE env) is required. Please specify a query key file path.")
 	}
 	if *taskTokenSecret == "" && !*allowStaticAgentKey {
 		log.Fatal("Error: -task-token-secret is required unless -allow-static-agent-key=true is set for development/compatibility.")
