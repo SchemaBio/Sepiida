@@ -200,6 +200,102 @@ func TestResolveOutputsDoesNotReadJSONOutsideExecutionDir(t *testing.T) {
 	}
 }
 
+func TestResolveOutputsRejectsLargeManifest(t *testing.T) {
+	executionDir := t.TempDir()
+	outputsPath := filepath.Join(executionDir, "outputs.json")
+	mustWrite(t, outputsPath, `{"padding":"`+strings.Repeat("x", maxArchiveManifestBytes)+`"}`)
+
+	if _, _, err := resolveOutputs(outputsPath, executionDir); err == nil {
+		t.Fatal("expected oversized outputs.json to be rejected")
+	}
+}
+
+func TestResolveOutputsDoesNotExpandOversizedNestedJSON(t *testing.T) {
+	executionDir := t.TempDir()
+	nestedJSON := filepath.Join(executionDir, "nested.json")
+	mustWrite(t, nestedJSON, `{"secret":"`+strings.Repeat("x", maxNestedJSONBytes)+`"}`)
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{
+		"manifest": nestedJSON,
+	})
+
+	resolved, pathMap, err := resolveOutputs(filepath.Join(executionDir, "outputs.json"), executionDir)
+	if err != nil {
+		t.Fatalf("resolveOutputs returned error: %v", err)
+	}
+	data, err := json.Marshal(resolved)
+	if err != nil {
+		t.Fatalf("failed to marshal resolved outputs: %v", err)
+	}
+	if strings.Contains(string(data), "secret") {
+		t.Fatalf("oversized nested JSON content was expanded: %s", string(data[:min(len(data), 200)]))
+	}
+	if _, ok := pathMap[nestedJSON]; !ok {
+		t.Fatalf("oversized nested JSON should remain as a file path to archive/preserve, pathMap=%v", pathMap)
+	}
+}
+
+func TestArchiveWorkflowHandlesNonRegularOutputsManifest(t *testing.T) {
+	ctx := context.Background()
+	executionDir := t.TempDir()
+	uuid := "sample-uuid"
+
+	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
+	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
+	if err := os.Mkdir(filepath.Join(executionDir, "outputs.json"), 0o755); err != nil {
+		t.Fatalf("failed to create outputs.json directory: %v", err)
+	}
+
+	backend := &memoryBackend{
+		basePath: "https://storage.example/archive",
+		uploads:  make(map[string]string),
+	}
+	archiver := NewArchiver(backend)
+
+	result, err := archiver.ArchiveWorkflow(ctx, uuid, "run-1", executionDir)
+	if err != nil {
+		t.Fatalf("ArchiveWorkflow returned error for non-regular outputs manifest: %v", err)
+	}
+	if result.ArchivedCount != 2 {
+		t.Fatalf("expected only regular workflow.log and inputs.json to be archived, got %d uploads=%v", result.ArchivedCount, backend.uploads)
+	}
+	if _, ok := backend.uploads[result.OutputsResolvedKey]; ok {
+		t.Fatalf("outputs.resolved.json should not be uploaded when outputs.json is non-regular: uploads=%v", backend.uploads)
+	}
+}
+
+func TestArchiveIgnoresNonRegularOutputPaths(t *testing.T) {
+	ctx := context.Background()
+	executionDir := t.TempDir()
+	uuid := "sample-uuid"
+	outputDir := filepath.Join(executionDir, "not-a-file")
+
+	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
+	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
+	if err := os.Mkdir(outputDir, 0o755); err != nil {
+		t.Fatalf("failed to create output directory: %v", err)
+	}
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{
+		"bad": outputDir,
+	})
+
+	backend := &memoryBackend{
+		basePath: "https://storage.example/archive",
+		uploads:  make(map[string]string),
+	}
+	archiver := NewArchiver(backend)
+
+	result, err := archiver.ArchiveWorkflow(ctx, uuid, "run-1", executionDir)
+	if err != nil {
+		t.Fatalf("ArchiveWorkflow returned error: %v", err)
+	}
+	if result.ArchivedCount != 4 {
+		t.Fatalf("expected manifests and rewritten outputs only, got %d uploads=%v", result.ArchivedCount, backend.uploads)
+	}
+	if _, ok := backend.uploads[uuid+"/not-a-file"]; ok {
+		t.Fatalf("non-regular output path was archived: uploads=%v", backend.uploads)
+	}
+}
+
 func mustWriteJSON(t *testing.T, path string, value interface{}) {
 	t.Helper()
 	data, err := json.Marshal(value)

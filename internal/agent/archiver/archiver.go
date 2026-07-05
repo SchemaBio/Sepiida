@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -18,6 +19,11 @@ import (
 type Archiver struct {
 	backend Backend
 }
+
+const (
+	maxArchiveManifestBytes = 10 << 20 // workflow inputs/outputs JSON manifests
+	maxNestedJSONBytes      = 1 << 20  // nested JSON references inside outputs
+)
 
 // NewArchiver creates a new archiver with the given backend.
 func NewArchiver(backend Backend) *Archiver {
@@ -244,6 +250,9 @@ func (a *Archiver) archiveFileByKey(ctx context.Context, key string, filePath st
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
 	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", filePath)
+	}
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -279,7 +288,7 @@ func resolveOutputs(outputsPath string, executionDir string) (interface{}, map[s
 		return nil, nil, err
 	}
 
-	data, err := os.ReadFile(outputsRealPath)
+	data, err := readRegularFile(outputsRealPath, maxArchiveManifestBytes)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -339,7 +348,7 @@ func resolveJSONFile(s string, executionDir string) interface{} {
 		return s
 	}
 
-	data, err := os.ReadFile(realPath)
+	data, err := readRegularFile(realPath, maxNestedJSONBytes)
 	if err != nil {
 		return s
 	}
@@ -392,7 +401,7 @@ func collectAllPaths(v interface{}, execDir string, paths *[]string) {
 			return
 		}
 		info, err := os.Stat(realPath)
-		if err != nil || info.IsDir() {
+		if err != nil || !info.Mode().IsRegular() {
 			return
 		}
 		*paths = append(*paths, val)
@@ -457,6 +466,9 @@ func (a *Archiver) archiveFile(ctx context.Context, uuid string, executionDir st
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
 	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", realPath)
+	}
 
 	f, err := os.Open(realPath)
 	if err != nil {
@@ -471,6 +483,38 @@ func (a *Archiver) archiveFile(ctx context.Context, uuid string, executionDir st
 
 	key := uuid + "/" + relPath
 	return a.backend.Upload(ctx, key, f, info.Size())
+}
+
+func readRegularFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", path)
+	}
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return nil, fmt.Errorf("file too large: %s", path)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	limit := maxBytes
+	if limit <= 0 {
+		limit = info.Size()
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file too large: %s", path)
+	}
+	return data, nil
 }
 
 // Close releases resources held by the archiver.

@@ -119,6 +119,41 @@ func TestResolveOutputsJSONDoesNotReadOutsideExecutionDir(t *testing.T) {
 	}
 }
 
+func TestResolveOutputsJSONRejectsLargeOutputs(t *testing.T) {
+	execDir := t.TempDir()
+	outputsPath := filepath.Join(execDir, "outputs.json")
+	writeCollectorTestFile(t, outputsPath, `{"padding":"`+strings.Repeat("x", maxOutputsJSONBytes)+`"}`)
+
+	if _, err := resolveOutputsJSON(outputsPath, execDir); err == nil {
+		t.Fatal("expected oversized outputs.json to be rejected")
+	}
+}
+
+func TestResolveOutputsJSONDoesNotResolveOversizedNestedJSON(t *testing.T) {
+	execDir := t.TempDir()
+	nestedJSON := filepath.Join(execDir, "nested.json")
+	writeCollectorTestFile(t, nestedJSON, `{"secret":"`+strings.Repeat("x", maxResolvedJSONFileBytes)+`"}`)
+
+	outputsPath := filepath.Join(execDir, "outputs.json")
+	writeCollectorTestJSON(t, outputsPath, map[string]string{"manifest": nestedJSON})
+
+	resolved, err := resolveOutputsJSON(outputsPath, execDir)
+	if err != nil {
+		t.Fatalf("resolveOutputsJSON returned error: %v", err)
+	}
+	if strings.Contains(resolved, "secret") {
+		t.Fatalf("oversized nested JSON should not be expanded: %s", resolved[:min(len(resolved), 200)])
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(resolved), &parsed); err != nil {
+		t.Fatalf("resolved outputs is not JSON: %v", err)
+	}
+	if parsed["manifest"] != nestedJSON {
+		t.Fatalf("oversized nested JSON path should be preserved, got %q want %q", parsed["manifest"], nestedJSON)
+	}
+}
+
 func TestReadTaskLogsRejectsOutsideExecutionDir(t *testing.T) {
 	execDir := t.TempDir()
 	outsideTaskDir := filepath.Join(t.TempDir(), "call-Outside")
@@ -131,6 +166,24 @@ func TestReadTaskLogsRejectsOutsideExecutionDir(t *testing.T) {
 	stdout, stderr := readTaskLogs(outsideTaskDir, execDir)
 	if stdout != "" || stderr != "" {
 		t.Fatalf("outside task logs should not be read, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestReadTaskLogsRejectsLargeAndNonRegularFiles(t *testing.T) {
+	execDir := t.TempDir()
+	taskDir := filepath.Join(execDir, "call-LargeLogs")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("failed to create task dir: %v", err)
+	}
+
+	writeCollectorTestFile(t, filepath.Join(taskDir, "stdout.txt"), strings.Repeat("x", maxTaskLogBytes+1))
+	if err := os.Mkdir(filepath.Join(taskDir, "stderr.txt"), 0o755); err != nil {
+		t.Fatalf("failed to create stderr directory: %v", err)
+	}
+
+	stdout, stderr := readTaskLogs(taskDir, execDir)
+	if stdout != "" || stderr != "" {
+		t.Fatalf("large/non-regular task logs should not be read, got stdout len=%d stderr=%q", len(stdout), stderr)
 	}
 }
 

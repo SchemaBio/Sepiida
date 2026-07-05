@@ -81,6 +81,53 @@ func TestSendOutputReturnsServerErrorBody(t *testing.T) {
 	}
 }
 
+func TestEndpointPreservesBasePathAndDropsQueryFragment(t *testing.T) {
+	sender := NewHTTPSender("http://sepiida.test/base/?debug=true#fragment", "static-key", "agent-1")
+
+	endpoint, err := sender.endpoint("/api/v1/progress")
+	if err != nil {
+		t.Fatalf("endpoint returned error: %v", err)
+	}
+	if endpoint != "http://sepiida.test/base/api/v1/progress" {
+		t.Fatalf("unexpected endpoint: %s", endpoint)
+	}
+}
+
+func TestEndpointRejectsUnsupportedURLForms(t *testing.T) {
+	tests := []string{
+		"ftp://sepiida.test",
+		"http://user:pass@sepiida.test",
+		"://missing-scheme",
+	}
+	for _, rawURL := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			sender := NewHTTPSender(rawURL, "static-key", "agent-1")
+			if _, err := sender.endpoint("/api/v1/progress"); err == nil {
+				t.Fatalf("expected endpoint to reject %q", rawURL)
+			}
+		})
+	}
+}
+
+func TestSendOutputTruncatesLargeServerErrorBody(t *testing.T) {
+	sender := NewHTTPSender("http://sepiida.test", "static-key", "agent-1")
+	sender.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return testResponse(http.StatusInternalServerError, strings.Repeat("x", maxErrorBodyBytes+100)), nil
+	})}
+
+	err := sender.SendOutput("sample-uuid", "run-1", "{}")
+	if err == nil {
+		t.Fatal("expected SendOutput to return server error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, strings.Repeat("x", maxErrorBodyBytes)) || !strings.Contains(msg, "...") {
+		t.Fatalf("expected truncated body with ellipsis, got: %v", err)
+	}
+	if strings.Contains(msg, strings.Repeat("x", maxErrorBodyBytes+1)) {
+		t.Fatalf("error body was not truncated: %d-byte message", len(msg))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {

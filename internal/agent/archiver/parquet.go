@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -20,6 +19,8 @@ var textExtensions = map[string]bool{
 	".csv": true,
 	".tsv": true,
 }
+
+const maxTextParquetInputBytes = 256 << 20
 
 // isTextFile checks if a file path has a text extension.
 func isTextFile(path string) bool {
@@ -38,7 +39,7 @@ func parquetFileName(originalName string) string {
 // based on the header row, and returns the Parquet binary content.
 // Returns the Parquet data and the column names extracted from header.
 func buildSingleFileParquet(filePath string) ([]byte, []string, error) {
-	data, err := os.ReadFile(filePath)
+	data, err := readRegularFile(filePath, maxTextParquetInputBytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read file: %w", err)
 	}

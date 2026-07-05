@@ -3,6 +3,7 @@ package collector
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,6 +18,12 @@ import (
 
 // uuidPattern matches standard UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 var uuidPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+const (
+	maxTaskLogBytes          = 1 << 20  // 1 MiB per stdout/stderr file
+	maxOutputsJSONBytes      = 10 << 20 // 10 MiB for outputs.json
+	maxResolvedJSONFileBytes = 1 << 20  // 1 MiB per nested JSON manifest
+)
 
 // ProgressCollector collects workflow progress from output directories
 type ProgressCollector struct {
@@ -239,13 +246,11 @@ func readTaskLogs(dir string, executionDir string) (string, string) {
 		return stdout, stderr
 	}
 
-	stdoutFile := filepath.Join(taskDir, "stdout.txt")
-	if data, err := os.ReadFile(stdoutFile); err == nil {
+	if data, err := readRegularFileWithin(taskDir, "stdout.txt", maxTaskLogBytes); err == nil {
 		stdout = string(data)
 	}
 
-	stderrFile := filepath.Join(taskDir, "stderr.txt")
-	if data, err := os.ReadFile(stderrFile); err == nil {
+	if data, err := readRegularFileWithin(taskDir, "stderr.txt", maxTaskLogBytes); err == nil {
 		stderr = string(data)
 	}
 
@@ -262,7 +267,7 @@ func resolveOutputsJSON(outputsPath string, executionDir string) (string, error)
 		return "", err
 	}
 
-	data, err := os.ReadFile(outputsRealPath)
+	data, err := readRegularFile(outputsRealPath, maxOutputsJSONBytes)
 	if err != nil {
 		return "", err
 	}
@@ -345,7 +350,7 @@ func resolveString(s string, executionDir string) (interface{}, bool) {
 	}
 
 	// Try reading as JSON for recursive resolution
-	data, err := os.ReadFile(realPath)
+	data, err := readRegularFile(realPath, maxResolvedJSONFileBytes)
 	if err != nil {
 		// Can't read, but still return resolved path if symlink changed
 		if realPath != filepath.Clean(s) {
@@ -368,4 +373,44 @@ func resolveString(s string, executionDir string) (interface{}, bool) {
 	resolved, _ := resolveValue(parsed, executionDir)
 	log.Printf("Resolved outputs reference: %s -> %s", s, realPath)
 	return resolved, true
+}
+
+func readRegularFileWithin(root, candidate string, maxBytes int64) ([]byte, error) {
+	realPath, err := pathsafe.ResolveExistingWithin(root, candidate)
+	if err != nil {
+		return nil, err
+	}
+	return readRegularFile(realPath, maxBytes)
+}
+
+func readRegularFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", path)
+	}
+	if maxBytes > 0 && info.Size() > maxBytes {
+		return nil, fmt.Errorf("file too large: %s", path)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	limit := maxBytes
+	if limit <= 0 {
+		limit = info.Size()
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file too large: %s", path)
+	}
+	return data, nil
 }

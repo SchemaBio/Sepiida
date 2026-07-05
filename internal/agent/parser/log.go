@@ -18,6 +18,11 @@ type LogParser struct {
 	workflowID string
 }
 
+const (
+	initialScannerBuffer = 64 << 10
+	maxLogLineBytes      = 1 << 20
+)
+
 // NewLogParser creates a new log parser
 func NewLogParser() *LogParser {
 	return &LogParser{}
@@ -174,6 +179,7 @@ func (p *LogParser) ParseLogFile(filePath string) (*model.Workflow, []model.Task
 	taskEvents := make(map[string][]TaskEvent)
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, initialScannerBuffer), maxLogLineBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 

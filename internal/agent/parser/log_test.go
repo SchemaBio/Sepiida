@@ -3,6 +3,7 @@ package parser
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
@@ -78,6 +79,39 @@ func TestParseLogFileFailedTask(t *testing.T) {
 	}
 	if tasks[0].Status != model.TaskStatusFailed || tasks[0].ExitCode == nil || *tasks[0].ExitCode != 1 {
 		t.Fatalf("unexpected failed task: %+v", tasks[0])
+	}
+}
+
+func TestParseLogFileAllowsLongLinesWithinLimit(t *testing.T) {
+	dir := t.TempDir()
+	execDir := filepath.Join(dir, "20260428_094955_SingleWES")
+	if err := os.MkdirAll(execDir, 0o755); err != nil {
+		t.Fatalf("failed to create execution dir: %v", err)
+	}
+
+	logPath := filepath.Join(execDir, "workflow.log")
+	longSource := strings.Repeat("a", initialScannerBuffer+1024)
+	writeParserTestFile(t, logPath,
+		`2026-04-28 09:49:55.697 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "`+longSource+`", dir: "`+execDir+`"`+"\n"+
+			`2026-04-28 10:20:05.417 wdl.w:SingleWES NOTICE done`+"\n")
+
+	workflow, _, err := NewLogParser().ParseLogFile(logPath)
+	if err != nil {
+		t.Fatalf("ParseLogFile should accept lines above the scanner default buffer: %v", err)
+	}
+	if workflow == nil || workflow.Status != model.WorkflowStatusSuccess {
+		t.Fatalf("unexpected workflow from long line: %+v", workflow)
+	}
+}
+
+func TestParseLogFileRejectsLinesAboveLimit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "workflow.log")
+	writeParserTestFile(t, logPath, strings.Repeat("x", maxLogLineBytes+1)+"\n")
+
+	_, _, err := NewLogParser().ParseLogFile(logPath)
+	if err == nil {
+		t.Fatal("expected ParseLogFile to reject a line above maxLogLineBytes")
 	}
 }
 
