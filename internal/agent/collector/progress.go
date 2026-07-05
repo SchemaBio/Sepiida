@@ -23,14 +23,17 @@ const (
 	maxTaskLogBytes          = 1 << 20  // 1 MiB per stdout/stderr file
 	maxOutputsJSONBytes      = 10 << 20 // 10 MiB for outputs.json
 	maxResolvedJSONFileBytes = 1 << 20  // 1 MiB per nested JSON manifest
+	maxLastPointerBytes      = 4 << 10  // 4 KiB for _LAST file fallback
+	maxJSONResolveDepth      = 32
 )
 
 // ProgressCollector collects workflow progress from output directories
 type ProgressCollector struct {
-	parser    *parser.LogParser
-	watchDirs []string
-	agentID   string
-	stateMgr  *state.StateManager
+	parser         *parser.LogParser
+	watchDirs      []string
+	agentID        string
+	stateMgr       *state.StateManager
+	archiveEnabled bool
 }
 
 // CollectResult represents the result of collection
@@ -39,6 +42,7 @@ type CollectResult struct {
 	UUIDDir      string // UUID directory path (where state file is stored)
 	ExecutionDir string // Execution directory path (where workflow.log is)
 	NeedPush     bool
+	State        *state.WorkflowState // state snapshot to persist only after a successful push
 }
 
 // NewProgressCollector creates a new progress collector
@@ -49,6 +53,13 @@ func NewProgressCollector(parser *parser.LogParser, watchDirs []string, agentID 
 		agentID:   agentID,
 		stateMgr:  state.NewStateManager(),
 	}
+}
+
+// SetArchiveEnabled controls whether completed workflows should keep being
+// returned until MarkArchived succeeds. When archiving is disabled, completed
+// workflows should not be re-pushed on every poll solely because Archived=false.
+func (c *ProgressCollector) SetArchiveEnabled(enabled bool) {
+	c.archiveEnabled = enabled
 }
 
 // Collect collects progress from all watched directories
@@ -143,7 +154,7 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		}
 
 		// Check if state has changed
-		needPush, newState := c.stateMgr.HasStateChanged(uuidDir, uuid, executionDir, workflow, tasks, logFileInfo)
+		needPush, newState := c.stateMgr.HasStateChanged(uuidDir, uuid, executionDir, workflow, tasks, logFileInfo, c.archiveEnabled)
 
 		progress := model.WorkflowProgress{
 			AgentID:  c.agentID,
@@ -157,13 +168,7 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 			UUIDDir:      uuidDir,
 			ExecutionDir: executionDir,
 			NeedPush:     needPush,
-		}
-
-		// Always save current state (even if no push needed)
-		if newState != nil {
-			if err := c.stateMgr.SaveState(uuidDir, newState); err != nil {
-				// Log error but continue
-			}
+			State:        newState,
 		}
 
 		// Only add to results if needs push
@@ -195,7 +200,7 @@ func resolveSymlink(symlinkPath string, rootDir string) (string, error) {
 			return "", err
 		}
 	} else if !info.IsDir() {
-		data, err := os.ReadFile(symlinkPath)
+		data, err := readRegularFileWithin(rootDir, symlinkPath, maxLastPointerBytes)
 		if err != nil {
 			return "", err
 		}
@@ -225,6 +230,16 @@ func resolveSymlink(symlinkPath string, rootDir string) (string, error) {
 // MarkOutputsPushed marks that outputs.json has been successfully pushed
 func (c *ProgressCollector) MarkOutputsPushed(uuidDir string) error {
 	return c.stateMgr.MarkOutputsPushed(uuidDir)
+}
+
+// SaveState persists a collected state snapshot after its corresponding server
+// update succeeds. Failed pushes intentionally leave the previous state in
+// place so the next polling cycle retries the update instead of dropping it.
+func (c *ProgressCollector) SaveState(uuidDir string, workflowState *state.WorkflowState) error {
+	if workflowState == nil {
+		return nil
+	}
+	return c.stateMgr.SaveState(uuidDir, workflowState)
 }
 
 // LoadState loads the workflow state for a UUID directory.
@@ -294,18 +309,21 @@ func resolveJSONValues(data []byte, executionDir string) (interface{}, bool) {
 		return nil, false
 	}
 
-	return resolveValue(raw, executionDir)
+	return resolveValue(raw, executionDir, 0, make(map[string]struct{}))
 }
 
 // resolveValue recursively resolves a JSON value.
-func resolveValue(v interface{}, executionDir string) (interface{}, bool) {
+func resolveValue(v interface{}, executionDir string, depth int, seen map[string]struct{}) (interface{}, bool) {
+	if depth > maxJSONResolveDepth {
+		return v, false
+	}
 	switch val := v.(type) {
 	case string:
-		return resolveString(val, executionDir)
+		return resolveString(val, executionDir, depth, seen)
 	case map[string]interface{}:
 		changed := false
 		for k, child := range val {
-			resolved, childChanged := resolveValue(child, executionDir)
+			resolved, childChanged := resolveValue(child, executionDir, depth+1, seen)
 			if childChanged {
 				val[k] = resolved
 				changed = true
@@ -315,7 +333,7 @@ func resolveValue(v interface{}, executionDir string) (interface{}, bool) {
 	case []interface{}:
 		changed := false
 		for i, child := range val {
-			resolved, childChanged := resolveValue(child, executionDir)
+			resolved, childChanged := resolveValue(child, executionDir, depth+1, seen)
 			if childChanged {
 				val[i] = resolved
 				changed = true
@@ -330,7 +348,7 @@ func resolveValue(v interface{}, executionDir string) (interface{}, bool) {
 // resolveString checks if a string is a file path and resolves it.
 // For all file paths: symlinks are resolved to real paths.
 // For JSON files: content is parsed and recursively resolved.
-func resolveString(s string, executionDir string) (interface{}, bool) {
+func resolveString(s string, executionDir string, depth int, seen map[string]struct{}) (interface{}, bool) {
 	if !pathsafe.IsAbsoluteLocalPath(s) {
 		return s, false
 	}
@@ -370,7 +388,16 @@ func resolveString(s string, executionDir string) (interface{}, bool) {
 	}
 
 	// JSON file — recursively resolve its contents
-	resolved, _ := resolveValue(parsed, executionDir)
+	if _, ok := seen[realPath]; ok {
+		if realPath != filepath.Clean(s) {
+			return realPath, true
+		}
+		return s, false
+	}
+	seen[realPath] = struct{}{}
+	defer delete(seen, realPath)
+
+	resolved, _ := resolveValue(parsed, executionDir, depth+1, seen)
 	log.Printf("Resolved outputs reference: %s -> %s", s, realPath)
 	return resolved, true
 }

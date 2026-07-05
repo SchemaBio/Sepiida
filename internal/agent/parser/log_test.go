@@ -71,8 +71,8 @@ func TestParseLogFileFailedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseLogFile returned error: %v", err)
 	}
-	if workflow == nil || workflow.Status != model.WorkflowStatusRunning {
-		t.Fatalf("workflow should remain running without done line: %+v", workflow)
+	if workflow == nil || workflow.Status != model.WorkflowStatusFailed {
+		t.Fatalf("workflow should be marked failed when a task has final failed status: %+v", workflow)
 	}
 	if len(tasks) != 1 {
 		t.Fatalf("expected one task, got %d", len(tasks))
@@ -112,6 +112,40 @@ func TestParseLogFileRejectsLinesAboveLimit(t *testing.T) {
 	_, _, err := NewLogParser().ParseLogFile(logPath)
 	if err == nil {
 		t.Fatal("expected ParseLogFile to reject a line above maxLogLineBytes")
+	}
+}
+
+func TestParseLogFileResetsWorkflowIDBetweenFiles(t *testing.T) {
+	dir := t.TempDir()
+	firstExecDir := filepath.Join(dir, "20260428_094955_SingleWES")
+	secondExecDir := filepath.Join(dir, "20260429_094955_SingleWES")
+	if err := os.MkdirAll(firstExecDir, 0o755); err != nil {
+		t.Fatalf("failed to create first execution dir: %v", err)
+	}
+	if err := os.MkdirAll(secondExecDir, 0o755); err != nil {
+		t.Fatalf("failed to create second execution dir: %v", err)
+	}
+
+	parser := NewLogParser()
+	firstLog := filepath.Join(firstExecDir, "workflow.log")
+	writeParserTestFile(t, firstLog,
+		`2026-04-28 09:49:55.697 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "workflow.wdl", dir: "`+firstExecDir+`"`+"\n")
+	if _, _, err := parser.ParseLogFile(firstLog); err != nil {
+		t.Fatalf("first ParseLogFile returned error: %v", err)
+	}
+
+	secondLog := filepath.Join(secondExecDir, "workflow.log")
+	writeParserTestFile(t, secondLog,
+		`2026-04-29 09:49:55.708 wdl.w:SingleWES.t:call-Orphan NOTICE task setup :: name: "Orphan", source: "workflow.wdl", dir: "`+secondExecDir+`/call-Orphan"`+"\n")
+	workflow, tasks, err := parser.ParseLogFile(secondLog)
+	if err != nil {
+		t.Fatalf("second ParseLogFile returned error: %v", err)
+	}
+	if workflow != nil {
+		t.Fatalf("expected no workflow without workflow start, got %+v", workflow)
+	}
+	if len(tasks) != 1 || tasks[0].WorkflowID != "" {
+		t.Fatalf("task inherited stale workflow ID: %+v", tasks)
 	}
 }
 

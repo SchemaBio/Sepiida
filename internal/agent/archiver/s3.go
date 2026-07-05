@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -59,6 +60,17 @@ func ParseS3URL(rawURL string) (endpoint, bucket, prefix string, useSSL bool, er
 	}
 
 	prefix = strings.TrimSuffix(prefix, "/")
+	prefix, err = normalizeObjectPrefix(prefix)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	bucket, err = validateArchiveComponent("bucket", bucket)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	if endpoint, err = validateArchiveEndpoint(endpoint); err != nil {
+		return "", "", "", false, err
+	}
 	return endpoint, bucket, prefix, useSSL, nil
 }
 
@@ -78,16 +90,42 @@ func parseHTTPURL(u *url.URL) (endpoint, bucket, prefix string, err error) {
 
 // parseCloudURL parses oss:// URLs with format: scheme://region/bucket/prefix
 func parseCloudURL(u *url.URL, scheme string) (region, bucket, prefix string, err error) {
-	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+	region, err = validateArchiveComponent("region", u.Host)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+	if len(parts) < 1 || parts[0] == "" {
 		return "", "", "", fmt.Errorf("%s:// URL must be in format: %s://region/bucket[/prefix]", scheme, scheme)
 	}
-	region = parts[0]
-	bucket = parts[1]
-	if len(parts) > 2 {
-		prefix = parts[2]
+	bucket, err = validateArchiveComponent("bucket", parts[0])
+	if err != nil {
+		return "", "", "", err
+	}
+	if len(parts) > 1 {
+		prefix = parts[1]
 	}
 	return region, bucket, prefix, nil
+}
+
+func validateArchiveEndpoint(endpoint string) (string, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", fmt.Errorf("endpoint is required")
+	}
+	if len(endpoint) > 255 {
+		return "", fmt.Errorf("endpoint exceeds 255 bytes")
+	}
+	if strings.Contains(endpoint, "/") || strings.Contains(endpoint, `\`) || strings.Contains(endpoint, "://") {
+		return "", fmt.Errorf("endpoint contains unsafe path or URL characters")
+	}
+	if strings.ContainsFunc(endpoint, func(r rune) bool {
+		return r < 0x20 || r == 0x7f || r == '@' || unicode.IsSpace(r)
+	}) {
+		return "", fmt.Errorf("endpoint contains unsafe characters")
+	}
+	return endpoint, nil
 }
 
 // NewS3Backend creates an S3-compatible archive backend.
@@ -138,12 +176,12 @@ func (b *S3Backend) BasePath() string {
 }
 
 func (b *S3Backend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {
-	objectKey := key
-	if b.prefix != "" {
-		objectKey = b.prefix + "/" + key
+	objectKey, err := joinObjectKey(b.prefix, key)
+	if err != nil {
+		return err
 	}
 
-	_, err := b.client.PutObject(ctx, b.bucket, objectKey, reader, size, minio.PutObjectOptions{})
+	_, err = b.client.PutObject(ctx, b.bucket, objectKey, reader, size, minio.PutObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to upload to S3 (%s/%s): %w", b.bucket, objectKey, err)
 	}

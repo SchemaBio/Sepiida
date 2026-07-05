@@ -3,7 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
@@ -19,21 +24,53 @@ type PostgreSQL struct {
 func NewPostgreSQL(cfg Config) (*PostgreSQL, error) {
 	connStr := cfg.DSN
 	if connStr == "" {
-		connStr = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.Database)
+		connStr = postgresURLDSN(cfg)
 	}
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open postgres database: %w", err)
 	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	// Test connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to connect to postgres database: %w", err)
 	}
 
 	return &PostgreSQL{db: db}, nil
+}
+
+func postgresURLDSN(cfg Config) string {
+	host := cfg.Host
+	if host == "" {
+		host = "localhost"
+	}
+	port := cfg.Port
+	if port <= 0 {
+		port = 5432
+	}
+	user := cfg.User
+	if user == "" {
+		user = "postgres"
+	}
+
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, cfg.Password),
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:   "/" + cfg.Database,
+	}
+	if escapedDatabase := url.PathEscape(cfg.Database); escapedDatabase != cfg.Database {
+		u.RawPath = "/" + escapedDatabase
+	}
+	q := u.Query()
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // Initialize creates tables
@@ -69,6 +106,7 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS key_prefix TEXT DEFAULT ''`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS archived_count INTEGER DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_workflows_uuid ON workflows(uuid)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflows_agent_id ON workflows(agent_id)`,
 		`CREATE TABLE IF NOT EXISTS tasks (
 				id TEXT PRIMARY KEY,
 				workflow_id TEXT NOT NULL,
@@ -87,6 +125,7 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 				FOREIGN KEY (workflow_id) REFERENCES workflows(id)
 			)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_uuid ON tasks(uuid)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_workflow_id ON tasks(workflow_id)`,
 	}
 
 	for _, query := range queries {
@@ -113,7 +152,7 @@ func (p *PostgreSQL) CreateWorkflow(ctx context.Context, workflow *model.Workflo
 	_, err := p.db.ExecContext(ctx, query,
 		workflow.ID, workflow.UUID, workflow.Name, workflow.Status,
 		workflow.StartTime, workflow.EndTime, workflow.OutputDir,
-		workflow.OutputsJSON, workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
+		normalizeJSONB(workflow.OutputsJSON), workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
 		workflow.ArchiveBase, workflow.BasePath, workflow.OutputsResolvedKey,
 		workflow.ObjectPrefix, workflow.KeyPrefix, workflow.ArchivedCount,
 		workflow.CreatedAt, workflow.UpdatedAt)
@@ -127,7 +166,7 @@ func (p *PostgreSQL) UpdateWorkflow(ctx context.Context, workflow *model.Workflo
 
 	res, err := p.db.ExecContext(ctx, query,
 		workflow.UUID, workflow.Name, workflow.Status, workflow.StartTime, workflow.EndTime,
-		workflow.OutputDir, workflow.OutputsJSON, workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
+		workflow.OutputDir, normalizeJSONB(workflow.OutputsJSON), workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
 		workflow.ArchiveBase, workflow.BasePath, workflow.OutputsResolvedKey,
 		workflow.ObjectPrefix, workflow.KeyPrefix, workflow.ArchivedCount,
 		workflow.UpdatedAt, workflow.ID)
@@ -235,6 +274,9 @@ func (p *PostgreSQL) GetWorkflowsByAgent(ctx context.Context, agentID string) ([
 		}
 		workflows = append(workflows, workflow)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return workflows, nil
 }
 
@@ -259,6 +301,9 @@ func (p *PostgreSQL) ListWorkflows(ctx context.Context, limit, offset int) ([]*m
 			return nil, err
 		}
 		workflows = append(workflows, workflow)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return workflows, nil
 }
@@ -330,5 +375,23 @@ func (p *PostgreSQL) GetTasksByWorkflow(ctx context.Context, workflowID string) 
 		}
 		tasks = append(tasks, task)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return tasks, nil
+}
+
+func normalizeJSONB(raw string) interface{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if json.Valid([]byte(raw)) {
+		return raw
+	}
+	quoted, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	return string(quoted)
 }

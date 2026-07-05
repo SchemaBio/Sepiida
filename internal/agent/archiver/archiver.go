@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,7 @@ type Archiver struct {
 const (
 	maxArchiveManifestBytes = 10 << 20 // workflow inputs/outputs JSON manifests
 	maxNestedJSONBytes      = 1 << 20  // nested JSON references inside outputs
+	maxJSONResolveDepth     = 32
 )
 
 // NewArchiver creates a new archiver with the given backend.
@@ -44,6 +47,11 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 	var backend Backend
 	var err error
 
+	if err := validateArchivePath(archivePath); err != nil {
+		return nil, err
+	}
+	archivePath = normalizeArchiveURLScheme(archivePath)
+
 	if isCOSURL(archivePath) {
 		backend, err = NewCOSBackend(archivePath, accessKeyID, secretAccessKey)
 	} else if isOSSURL(archivePath) {
@@ -61,13 +69,67 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 	return NewArchiver(backend), nil
 }
 
+func validateArchivePath(archivePath string) error {
+	archivePath = strings.TrimSpace(archivePath)
+	if archivePath == "" {
+		return fmt.Errorf("archive path is required")
+	}
+	if strings.ContainsFunc(archivePath, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return fmt.Errorf("archive path contains control characters")
+	}
+	if strings.HasPrefix(archivePath, "//") || strings.HasPrefix(archivePath, `\\`) {
+		return fmt.Errorf("archive path must not be scheme-relative or UNC-style; use an explicit local path or supported URL scheme")
+	}
+	if !strings.Contains(archivePath, "://") {
+		return nil
+	}
+
+	u, err := url.Parse(archivePath)
+	if err != nil {
+		return fmt.Errorf("invalid archive URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("archive URL must include scheme and host")
+	}
+	if u.User != nil {
+		return fmt.Errorf("archive URL must not include username or password")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("archive URL must not include query string or fragment")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "s3", "http", "https", "oss", "cos":
+		return nil
+	default:
+		return fmt.Errorf("unsupported archive URL scheme %q", u.Scheme)
+	}
+}
+
+func normalizeArchiveURLScheme(archivePath string) string {
+	archivePath = strings.TrimSpace(archivePath)
+	if !strings.Contains(archivePath, "://") {
+		return archivePath
+	}
+	u, err := url.Parse(archivePath)
+	if err != nil || u.Scheme == "" {
+		return archivePath
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	return u.String()
+}
+
 // isCOSURL checks if the path refers to Tencent Cloud COS.
 func isCOSURL(path string) bool {
-	if strings.HasPrefix(path, "cos://") {
+	u, err := url.Parse(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "cos" {
 		return true
 	}
-	if strings.HasPrefix(path, "https://") {
-		host := strings.SplitN(strings.TrimPrefix(path, "https://"), "/", 2)[0]
+	if scheme == "https" {
+		host := strings.ToLower(u.Hostname())
 		if strings.Contains(host, ".cos.") && strings.HasSuffix(host, ".myqcloud.com") {
 			return true
 		}
@@ -77,11 +139,16 @@ func isCOSURL(path string) bool {
 
 // isOSSURL checks if the path refers to Alibaba Cloud OSS.
 func isOSSURL(path string) bool {
-	if strings.HasPrefix(path, "oss://") {
+	u, err := url.Parse(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "oss" {
 		return true
 	}
-	if strings.HasPrefix(path, "https://") {
-		host := strings.SplitN(strings.TrimPrefix(path, "https://"), "/", 2)[0]
+	if scheme == "https" {
+		host := strings.ToLower(u.Hostname())
 		if strings.Contains(host, ".oss-") && strings.HasSuffix(host, ".aliyuncs.com") {
 			return true
 		}
@@ -91,13 +158,18 @@ func isOSSURL(path string) bool {
 
 // isS3URL checks if the path refers to S3-compatible storage (excluding COS and OSS).
 func isS3URL(path string) bool {
-	if strings.HasPrefix(path, "s3://") {
+	u, err := url.Parse(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "s3" {
 		return true
 	}
-	if strings.HasPrefix(path, "http://") {
+	if scheme == "http" {
 		return true
 	}
-	if strings.HasPrefix(path, "https://") && !isCOSURL(path) && !isOSSURL(path) {
+	if scheme == "https" && !isCOSURL(path) && !isOSSURL(path) {
 		return true
 	}
 	return false
@@ -118,6 +190,7 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 // workflow ID in the result so the server can update the correct execution.
 func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID string, executionDir string) (*model.ArchiveResult, error) {
 	archived := 0
+	var archiveErrs []error
 	result := &model.ArchiveResult{
 		UUID:               uuid,
 		WorkflowID:         workflowID,
@@ -137,6 +210,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	logPath := filepath.Join(executionDir, "workflow.log")
 	if err := a.archiveFile(ctx, uuid, executionDir, logPath); err != nil {
 		log.Printf("Warning: failed to archive workflow.log for %s: %v", uuid, err)
+		archiveErrs = append(archiveErrs, fmt.Errorf("archive workflow.log: %w", err))
 	} else {
 		archived++
 	}
@@ -145,6 +219,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	outputsPath := filepath.Join(executionDir, "outputs.json")
 	if err := a.archiveFile(ctx, uuid, executionDir, outputsPath); err != nil {
 		log.Printf("Warning: failed to archive outputs.json for %s: %v", uuid, err)
+		archiveErrs = append(archiveErrs, fmt.Errorf("archive outputs.json: %w", err))
 	} else {
 		archived++
 	}
@@ -153,6 +228,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	inputsPath := filepath.Join(executionDir, "inputs.json")
 	if err := a.archiveFile(ctx, uuid, executionDir, inputsPath); err != nil {
 		log.Printf("Warning: failed to archive inputs.json for %s: %v", uuid, err)
+		archiveErrs = append(archiveErrs, fmt.Errorf("archive inputs.json: %w", err))
 	} else {
 		archived++
 	}
@@ -160,9 +236,8 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	// 4. Resolve outputs.json (recursive tmp file resolution only, preserve original paths)
 	resolvedJSON, pathMap, err := resolveOutputs(outputsPath, executionDir)
 	if err != nil {
-		log.Printf("Warning: failed to resolve outputs.json for %s: %v", uuid, err)
 		result.ArchivedCount = archived
-		return result, nil
+		return result, fmt.Errorf("resolve outputs.json: %w", err)
 	}
 
 	log.Printf("Archive: resolved %d files for UUID %s, execDir=%s", len(pathMap), uuid, executionDir)
@@ -172,17 +247,6 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	for origPath := range pathMap {
 		if isTextFile(origPath) {
 			textFiles = append(textFiles, origPath)
-		}
-	}
-
-	// Update pathMap: convert text file paths to .parquet extensions
-	// This ensures outputs.resolved.json references .parquet files instead of .txt
-	for origPath, archiveKey := range pathMap {
-		if isTextFile(origPath) {
-			// Replace extension with .parquet
-			ext := filepath.Ext(archiveKey)
-			base := strings.TrimSuffix(archiveKey, ext)
-			pathMap[origPath] = base + ".parquet"
 		}
 	}
 
@@ -211,33 +275,52 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 		log.Printf("Archive: uploading %s (real: %s) -> key=%s", origPath, realPath, archiveKey)
 		if err := a.archiveFileByKey(ctx, archiveKey, realPath); err != nil {
 			log.Printf("Warning: failed to archive %s for %s: %v", origPath, uuid, err)
+			archiveErrs = append(archiveErrs, fmt.Errorf("archive output %s: %w", origPath, err))
 			continue
 		}
 		archived++
 	}
 
-	// 6. Convert each text file to individual Parquet file with dynamic schema
+	// 6. Convert each text file to individual Parquet file with dynamic schema.
+	// If conversion cannot safely produce Parquet (for example header-only or
+	// malformed tabular output), archive the original text file and keep the
+	// rewritten manifest pointing to that uploaded object. This avoids marking an
+	// archive complete while outputs.resolved.json references a missing parquet.
 	for _, textFile := range textFiles {
-		parquetKey := pathMap[textFile]
+		originalKey := pathMap[textFile]
+		ext := filepath.Ext(originalKey)
+		parquetKey := strings.TrimSuffix(originalKey, ext) + ".parquet"
 		realPath, err := pathsafe.ResolveExistingWithin(executionDir, textFile)
 		if err != nil {
 			log.Printf("Warning: failed to resolve text file %s: %v", textFile, err)
+			archiveErrs = append(archiveErrs, fmt.Errorf("resolve text output %s: %w", textFile, err))
 			continue
 		}
 		if err := a.archiveSingleParquet(ctx, realPath, parquetKey); err != nil {
-			log.Printf("Warning: failed to archive parquet for %s: %v", textFile, err)
+			log.Printf("Warning: failed to convert %s to parquet, archiving original text instead: %v", textFile, err)
+			if uploadErr := a.archiveFileByKey(ctx, originalKey, realPath); uploadErr != nil {
+				archiveErrs = append(archiveErrs, fmt.Errorf("archive text output %s: parquet conversion failed (%v), fallback upload failed: %w", textFile, err, uploadErr))
+				continue
+			}
+			archived++
 			continue
 		}
+		pathMap[textFile] = parquetKey
 		archived++
 		log.Printf("Converted %s to parquet -> key=%s", filepath.Base(textFile), parquetKey)
 	}
 
+	if err := errors.Join(archiveErrs...); err != nil {
+		result.ArchivedCount = archived
+		return result, err
+	}
+
 	// 7. Upload rewritten outputs.json with archive paths
 	if err := a.uploadRewrittenOutputs(ctx, uuid, resolvedJSON, pathMap); err != nil {
-		log.Printf("Warning: failed to upload rewritten outputs.json for %s: %v", uuid, err)
-	} else {
-		archived++
+		result.ArchivedCount = archived
+		return result, fmt.Errorf("upload rewritten outputs.json: %w", err)
 	}
+	archived++
 
 	log.Printf("Archived %d items for UUID %s", archived, uuid)
 	result.ArchivedCount = archived
@@ -312,17 +395,24 @@ func resolveOutputs(outputsPath string, executionDir string) (interface{}, map[s
 // whose content is valid JSON, read and replace with the parsed content.
 // Does NOT resolve symlinks — original paths are preserved.
 func resolveJSONFiles(v interface{}, executionDir string) interface{} {
+	return resolveJSONFilesWithState(v, executionDir, 0, make(map[string]struct{}))
+}
+
+func resolveJSONFilesWithState(v interface{}, executionDir string, depth int, seen map[string]struct{}) interface{} {
+	if depth > maxJSONResolveDepth {
+		return v
+	}
 	switch val := v.(type) {
 	case string:
-		return resolveJSONFile(val, executionDir)
+		return resolveJSONFile(val, executionDir, depth, seen)
 	case map[string]interface{}:
 		for k, child := range val {
-			val[k] = resolveJSONFiles(child, executionDir)
+			val[k] = resolveJSONFilesWithState(child, executionDir, depth+1, seen)
 		}
 		return val
 	case []interface{}:
 		for i, child := range val {
-			val[i] = resolveJSONFiles(child, executionDir)
+			val[i] = resolveJSONFilesWithState(child, executionDir, depth+1, seen)
 		}
 		return val
 	default:
@@ -333,7 +423,7 @@ func resolveJSONFiles(v interface{}, executionDir string) interface{} {
 // resolveJSONFile checks if a string is a path to a JSON file and resolves it.
 // Symlinks are resolved only to read the file content; the original path string
 // is returned if the file is not JSON.
-func resolveJSONFile(s string, executionDir string) interface{} {
+func resolveJSONFile(s string, executionDir string, depth int, seen map[string]struct{}) interface{} {
 	if !pathsafe.IsAbsoluteLocalPath(s) {
 		return s
 	}
@@ -359,8 +449,14 @@ func resolveJSONFile(s string, executionDir string) interface{} {
 	}
 
 	// It's a JSON file — recursively resolve its contents
+	if _, ok := seen[realPath]; ok {
+		return s
+	}
+	seen[realPath] = struct{}{}
+	defer delete(seen, realPath)
+
 	log.Printf("Resolved outputs reference: %s", s)
-	return resolveJSONFiles(parsed, executionDir)
+	return resolveJSONFilesWithState(parsed, executionDir, depth+1, seen)
 }
 
 // collectPathsFlat collects all file paths from the resolved JSON structure,
@@ -370,23 +466,65 @@ func collectPathsFlat(v interface{}, execDir string, pathMap map[string]string) 
 	// Step 1: Collect all valid file paths
 	var allPaths []string
 	collectAllPaths(v, execDir, &allPaths)
+	allPaths = uniqueStringsPreserveOrder(allPaths)
 
 	// Step 2: Generate flattened archive keys with conflict resolution
-	usedKeys := make(map[string]int)
+	reservedBasenames := make(map[string]struct{}, len(allPaths))
+	for _, path := range allPaths {
+		reservedBasenames[filepath.Base(path)] = struct{}{}
+	}
+
+	usedKeys := make(map[string]struct{})
+	nextSuffix := make(map[string]int)
 	for _, path := range allPaths {
 		filename := filepath.Base(path)
 		archiveKey := filename
 
-		// Handle filename conflicts by adding sequence number
-		if count, exists := usedKeys[archiveKey]; exists {
+		// Handle filename conflicts by adding sequence numbers. Track the
+		// generated archive keys separately so three files with the same basename
+		// do not all collapse to *_2.ext, and avoid colliding with an existing
+		// real basename such as result_2.bam.
+		if _, exists := usedKeys[archiveKey]; exists {
 			ext := filepath.Ext(archiveKey)
 			base := strings.TrimSuffix(archiveKey, ext)
-			archiveKey = fmt.Sprintf("%s_%d%s", base, count+1, ext)
+			suffix := nextSuffix[filename]
+			if suffix < 2 {
+				suffix = 2
+			}
+			for {
+				candidate := fmt.Sprintf("%s_%d%s", base, suffix, ext)
+				suffix++
+				_, used := usedKeys[candidate]
+				_, reserved := reservedBasenames[candidate]
+				if !used && !reserved {
+					archiveKey = candidate
+					break
+				}
+			}
+			nextSuffix[filename] = suffix
+		} else {
+			nextSuffix[filename] = 2
 		}
-		usedKeys[archiveKey]++
+		usedKeys[archiveKey] = struct{}{}
 
 		pathMap[path] = archiveKey
 	}
+}
+
+func uniqueStringsPreserveOrder(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 // collectAllPaths recursively collects all valid file paths from the JSON structure.

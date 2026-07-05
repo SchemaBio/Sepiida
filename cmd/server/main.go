@@ -14,6 +14,7 @@ import (
 
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/db"
+	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 	"github.com/SchemaBio/Sepiida/internal/server/handler"
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
@@ -22,26 +23,34 @@ import (
 func main() {
 	// Command line flags
 	port := flag.String("p", "9090", "server listen port")
-	database := flag.String("d", "postgres://localhost:5432/sepiida?user=postgres&password=postgres", "database connection string (postgres://host:port/db?user=xxx&password=xxx)")
+	database := flag.String("d", defaultDatabaseURL(), "database connection string; env: DATABASE_URL")
 	// Key files default from env so containers can supply them via env vars
 	// instead of being forced to override the entrypoint with explicit flags.
 	// Precedence: CLI flag > env var > "" (which we still validate as required).
-	agentKeyFile := flag.String("agent-key", os.Getenv("SEPIIDA_AGENT_KEY_FILE"), "path to agent key file (keys for pushing data); env: SEPIIDA_AGENT_KEY_FILE")
-	queryKeyFile := flag.String("query-key", os.Getenv("SEPIIDA_QUERY_KEY_FILE"), "path to query key file (keys for querying results); env: SEPIIDA_QUERY_KEY_FILE")
-	keyRefresh := flag.Int("key-refresh", 30, "key file refresh interval in seconds")
+	agentKeyFile := flag.String("agent-key", firstNonEmptyEnv("SEPIIDA_AGENT_KEY_FILE", "SEPIIDA_AGENT_KEYS_FILE"), "path to agent key file (keys for pushing data); env: SEPIIDA_AGENT_KEY_FILE")
+	queryKeyFile := flag.String("query-key", firstNonEmptyEnv("SEPIIDA_QUERY_KEY_FILE", "SEPIIDA_QUERY_KEYS_FILE"), "path to query key file (keys for querying results); env: SEPIIDA_QUERY_KEY_FILE")
+	keyRefresh := flag.Int("key-refresh", parsePositiveIntEnv("SEPIIDA_KEY_REFRESH_SECONDS", 30), "key file refresh interval in seconds; env: SEPIIDA_KEY_REFRESH_SECONDS")
 	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task agent tokens")
 	allowStaticAgentKey := flag.Bool("allow-static-agent-key", parseBoolEnv("SEPIIDA_ALLOW_STATIC_AGENT_KEY", false), "allow static agent keys for write APIs (development/compatibility only)")
 	flag.Parse()
 
-	// Validate key files
-	if *agentKeyFile == "" {
-		log.Fatal("Error: -agent-key (or SEPIIDA_AGENT_KEY_FILE env) is required. Please specify an agent key file path.")
+	// Validate key files. Static agent keys are only needed when explicitly
+	// enabling legacy/development writes; production CVM agents should use
+	// per-task tokens signed by Squid instead.
+	if *agentKeyFile == "" && *allowStaticAgentKey {
+		log.Fatal("Error: -agent-key (or SEPIIDA_AGENT_KEY_FILE env) is required when -allow-static-agent-key=true.")
 	}
 	if *queryKeyFile == "" {
 		log.Fatal("Error: -query-key (or SEPIIDA_QUERY_KEY_FILE env) is required. Please specify a query key file path.")
 	}
 	if *taskTokenSecret == "" && !*allowStaticAgentKey {
 		log.Fatal("Error: -task-token-secret is required unless -allow-static-agent-key=true is set for development/compatibility.")
+	}
+	if *taskTokenSecret != "" && len(*taskTokenSecret) < tasktoken.MinSecretBytes {
+		log.Fatalf("Error: -task-token-secret must be at least %d characters. Leave it empty only when -allow-static-agent-key=true is set for development/compatibility.", tasktoken.MinSecretBytes)
+	}
+	if *keyRefresh <= 0 {
+		log.Fatal("Error: -key-refresh must be greater than 0 seconds.")
 	}
 
 	// Initialize multi key manager
@@ -55,7 +64,11 @@ func main() {
 	queryKeyCount := mkm.QueryKeyCount()
 
 	if agentKeyCount == 0 {
-		log.Printf("Warning: No agent keys loaded from %s", *agentKeyFile)
+		if *allowStaticAgentKey {
+			log.Printf("Warning: No agent keys loaded from %s", *agentKeyFile)
+		} else {
+			log.Printf("Static agent key writes are disabled; no agent keys are required")
+		}
 	} else {
 		log.Printf("Loaded %d agent keys from %s", agentKeyCount, *agentKeyFile)
 	}
@@ -138,8 +151,14 @@ func main() {
 
 	// Health check endpoint (no authentication required)
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		if r.Method == http.MethodGet {
+			w.Write([]byte("OK"))
+		}
 	})
 
 	// Start server
@@ -157,6 +176,7 @@ func main() {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 
 	if err := server.ListenAndServe(); err != nil {
@@ -175,6 +195,35 @@ func parseBoolEnv(name string, fallback bool) bool {
 		return fallback
 	}
 	return value
+}
+
+func parsePositiveIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		log.Printf("Warning: invalid %s=%q, using %d", name, raw, fallback)
+		return fallback
+	}
+	return value
+}
+
+func firstNonEmptyEnv(names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func defaultDatabaseURL() string {
+	if value := firstNonEmptyEnv("DATABASE_URL"); value != "" {
+		return value
+	}
+	return "postgres://localhost:5432/sepiida?user=postgres&password=postgres"
 }
 
 func redactDatabaseURL(conn string) string {

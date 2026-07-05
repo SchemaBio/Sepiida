@@ -13,7 +13,7 @@ import (
 )
 
 func TestSendProgressUsesTaskToken(t *testing.T) {
-	const secret = "shared-secret"
+	const secret = "0123456789abcdef0123456789abcdef"
 
 	var authHeader string
 	sender := NewHTTPSenderWithTaskToken("http://sepiida.test", "static-key", "agent-1", secret)
@@ -38,8 +38,37 @@ func TestSendProgressUsesTaskToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authorization did not contain a valid task token: %v", err)
 	}
-	if claims.UUID != "sample-uuid" || claims.AgentID != "agent-1" {
+	if claims.UUID != "sample-uuid" || claims.AgentID != "agent-1" || claims.WorkflowID != "run-1" {
 		t.Fatalf("unexpected token claims: %+v", claims)
+	}
+}
+
+func TestSendProgressPrefersProvidedTaskToken(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	token, err := tasktoken.GenerateForWorkflow(secret, "sample-uuid", "agent-1", "run-1", 0)
+	if err != nil {
+		t.Fatalf("GenerateForWorkflow returned error: %v", err)
+	}
+
+	var authHeader string
+	sender := NewHTTPSenderWithTaskCredential("http://sepiida.test", "static-key", "agent-1", token, "different-secret-0123456789abcdef")
+	sender.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		authHeader = r.Header.Get("Authorization")
+		return testResponse(http.StatusOK, ""), nil
+	})}
+
+	err = sender.SendProgress(&model.WorkflowProgress{
+		AgentID: "agent-1",
+		UUID:    "sample-uuid",
+		Workflow: model.Workflow{
+			ID: "run-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SendProgress returned error: %v", err)
+	}
+	if authHeader != "Bearer "+token {
+		t.Fatalf("sender did not prefer provided task token: %q", authHeader)
 	}
 }
 
@@ -81,6 +110,25 @@ func TestSendOutputReturnsServerErrorBody(t *testing.T) {
 	}
 }
 
+func TestSendProgressRequiresAuthenticationToken(t *testing.T) {
+	sender := NewHTTPSender("http://sepiida.test", "", "agent-1")
+	sender.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("request should not be sent without an authentication token")
+		return testResponse(http.StatusOK, ""), nil
+	})}
+
+	err := sender.SendProgress(&model.WorkflowProgress{
+		AgentID: "agent-1",
+		UUID:    "sample-uuid",
+		Workflow: model.Workflow{
+			ID: "run-1",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "authentication token is required") {
+		t.Fatalf("expected missing auth token error, got %v", err)
+	}
+}
+
 func TestEndpointPreservesBasePathAndDropsQueryFragment(t *testing.T) {
 	sender := NewHTTPSender("http://sepiida.test/base/?debug=true#fragment", "static-key", "agent-1")
 
@@ -97,6 +145,9 @@ func TestEndpointRejectsUnsupportedURLForms(t *testing.T) {
 	tests := []string{
 		"ftp://sepiida.test",
 		"http://user:pass@sepiida.test",
+		"//sepiida.test",
+		`http://sepiida.test\evil`,
+		"http://sepiida.test\nextra",
 		"://missing-scheme",
 	}
 	for _, rawURL := range tests {

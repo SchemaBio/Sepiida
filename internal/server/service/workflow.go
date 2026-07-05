@@ -2,11 +2,20 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log"
+	"strings"
 
 	"github.com/SchemaBio/Sepiida/internal/common/db"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
+
+const workflowStorageIDSeparator = ":"
+
+// ErrWorkflowNotFound is returned when a write targets a workflow execution
+// that has not been reported yet. Returning a typed error lets HTTP handlers
+// avoid false-positive "ok" responses for dropped output/archive updates.
+var ErrWorkflowNotFound = errors.New("workflow not found")
 
 // WorkflowService handles workflow business logic
 type WorkflowService struct {
@@ -22,13 +31,17 @@ func NewWorkflowService(db db.Database) *WorkflowService {
 func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.WorkflowProgress) error {
 	progress.Workflow.UUID = progress.UUID
 	progress.Workflow.AgentID = progress.AgentID
-
-	// Workflow ID identifies a concrete MiniWDL execution. A UUID can have
-	// multiple executions, so UUID lookup must not decide update vs create.
-	existing, err := s.db.GetWorkflow(ctx, progress.Workflow.ID)
+	rawWorkflowID := progress.Workflow.ID
+	storageWorkflowID, existing, err := s.resolveWorkflowForWrite(ctx, progress.UUID, rawWorkflowID)
 	if err != nil {
 		return err
 	}
+	progress.Workflow.ID = storageWorkflowID
+
+	// Workflow.ID from MiniWDL is only unique inside a sample UUID. Store new
+	// executions under a UUID-qualified key to avoid collisions when two samples
+	// produce the same run directory name. Existing legacy rows that used the raw
+	// run ID are still updated in-place when they belong to the same UUID.
 
 	if existing == nil {
 		// Create new workflow
@@ -40,6 +53,7 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 		// Update existing workflow
 		log.Printf("Updating workflow: UUID=%s, ID=%s", progress.UUID, progress.Workflow.ID)
 		progress.Workflow.CreatedAt = existing.CreatedAt
+		preserveOutputsJSON(&progress.Workflow, existing)
 		preserveArchiveFields(&progress.Workflow, existing)
 		if err := s.db.UpdateWorkflow(ctx, &progress.Workflow); err != nil {
 			return err
@@ -49,7 +63,7 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 	// Process tasks
 	for _, task := range progress.Tasks {
 		task.UUID = progress.UUID
-		task.WorkflowID = progress.Workflow.ID
+		task.WorkflowID = storageWorkflowID
 
 		existingTask, err := s.db.GetTask(ctx, task.GenerateID())
 		if err != nil {
@@ -75,13 +89,17 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 
 // ProcessOutput processes workflow output
 func (s *WorkflowService) ProcessOutput(ctx context.Context, req *model.WorkflowOutputRequest) error {
-	// Prefer workflow ID because a UUID can have multiple executions.
-	existing, err := s.db.GetWorkflow(ctx, req.WorkflowID)
-	if err != nil {
-		return err
-	}
-
-	if existing == nil {
+	var existing *model.Workflow
+	var err error
+	if req.WorkflowID != "" {
+		// Prefer workflow ID because a UUID can have multiple executions. Do not
+		// fall back to "latest by UUID" when a concrete workflow was requested:
+		// that can attach outputs to the wrong execution.
+		req.WorkflowID, existing, err = s.resolveWorkflowForWrite(ctx, req.UUID, req.WorkflowID)
+		if err != nil {
+			return err
+		}
+	} else {
 		existing, err = s.db.GetWorkflowByUUID(ctx, req.UUID)
 		if err != nil {
 			return err
@@ -90,7 +108,7 @@ func (s *WorkflowService) ProcessOutput(ctx context.Context, req *model.Workflow
 
 	if existing == nil {
 		log.Printf("Workflow not found for output: UUID=%s, ID=%s", req.UUID, req.WorkflowID)
-		return nil
+		return ErrWorkflowNotFound
 	}
 
 	existing.OutputsJSON = req.OutputsJSON
@@ -120,7 +138,60 @@ func (s *WorkflowService) ListWorkflows(ctx context.Context, limit, offset int) 
 // MarkArchived marks a workflow's outputs as archived by UUID
 func (s *WorkflowService) MarkArchived(ctx context.Context, result *model.ArchiveResult) error {
 	normalizeArchiveResult(result)
+	if result.WorkflowID != "" {
+		workflowID, existing, err := s.resolveWorkflowForWrite(ctx, result.UUID, result.WorkflowID)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			return ErrWorkflowNotFound
+		}
+		result.WorkflowID = workflowID
+		return s.db.MarkArchived(ctx, result)
+	}
+
+	existing, err := s.db.GetWorkflowByUUID(ctx, result.UUID)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return ErrWorkflowNotFound
+	}
+	result.WorkflowID = existing.ID
 	return s.db.MarkArchived(ctx, result)
+}
+
+func (s *WorkflowService) resolveWorkflowForWrite(ctx context.Context, uuid string, workflowID string) (string, *model.Workflow, error) {
+	storageID := storageWorkflowID(uuid, workflowID)
+
+	existing, err := s.db.GetWorkflow(ctx, storageID)
+	if err != nil {
+		return storageID, nil, err
+	}
+	if existing != nil {
+		return storageID, existing, nil
+	}
+
+	if storageID != workflowID {
+		legacy, err := s.db.GetWorkflow(ctx, workflowID)
+		if err != nil {
+			return storageID, nil, err
+		}
+		if legacy != nil && legacy.UUID == uuid {
+			return workflowID, legacy, nil
+		}
+	}
+
+	return storageID, nil, nil
+}
+
+func storageWorkflowID(uuid string, workflowID string) string {
+	uuid = strings.TrimSpace(uuid)
+	workflowID = strings.TrimSpace(workflowID)
+	if uuid == "" || workflowID == "" || strings.HasPrefix(workflowID, uuid+workflowStorageIDSeparator) {
+		return workflowID
+	}
+	return uuid + workflowStorageIDSeparator + workflowID
 }
 
 func preserveArchiveFields(next *model.Workflow, existing *model.Workflow) {
@@ -132,6 +203,12 @@ func preserveArchiveFields(next *model.Workflow, existing *model.Workflow) {
 	next.ObjectPrefix = existing.ObjectPrefix
 	next.KeyPrefix = existing.KeyPrefix
 	next.ArchivedCount = existing.ArchivedCount
+}
+
+func preserveOutputsJSON(next *model.Workflow, existing *model.Workflow) {
+	if strings.TrimSpace(next.OutputsJSON) == "" {
+		next.OutputsJSON = existing.OutputsJSON
+	}
 }
 
 func normalizeArchiveResult(result *model.ArchiveResult) {

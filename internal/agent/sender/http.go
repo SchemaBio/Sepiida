@@ -22,6 +22,7 @@ type HTTPSender struct {
 	serverURL       string
 	apiKey          string
 	agentID         string
+	taskToken       string
 	taskTokenSecret string
 	client          *http.Client
 }
@@ -39,6 +40,17 @@ func NewHTTPSender(serverURL, apiKey, agentID string) *HTTPSender {
 // NewHTTPSenderWithTaskToken creates a sender that signs each write request with a per-task token.
 func NewHTTPSenderWithTaskToken(serverURL, apiKey, agentID, taskTokenSecret string) *HTTPSender {
 	s := NewHTTPSender(serverURL, apiKey, agentID)
+	s.taskTokenSecret = taskTokenSecret
+	return s
+}
+
+// NewHTTPSenderWithTaskCredential creates a sender that prefers a pre-issued
+// task token and only falls back to signing locally when a legacy shared secret
+// is explicitly configured. Production agents should receive taskToken rather
+// than the signing secret.
+func NewHTTPSenderWithTaskCredential(serverURL, apiKey, agentID, taskToken, taskTokenSecret string) *HTTPSender {
+	s := NewHTTPSender(serverURL, apiKey, agentID)
+	s.taskToken = strings.TrimSpace(taskToken)
 	s.taskTokenSecret = taskTokenSecret
 	return s
 }
@@ -61,7 +73,7 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.authorize(req, progress.UUID); err != nil {
+	if err := s.authorize(req, progress.UUID, progress.Workflow.ID); err != nil {
 		return err
 	}
 
@@ -100,7 +112,7 @@ func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.authorize(req, result.UUID); err != nil {
+	if err := s.authorize(req, result.UUID, result.WorkflowID); err != nil {
 		return err
 	}
 
@@ -143,7 +155,7 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.authorize(req, uuid); err != nil {
+	if err := s.authorize(req, uuid, workflowID); err != nil {
 		return err
 	}
 
@@ -161,21 +173,41 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 	return nil
 }
 
-func (s *HTTPSender) authorize(req *http.Request, uuid string) error {
+func (s *HTTPSender) authorize(req *http.Request, uuid string, workflowID string) error {
 	token := s.apiKey
-	if s.taskTokenSecret != "" {
+	if s.taskToken != "" {
+		token = s.taskToken
+	} else if s.taskTokenSecret != "" {
 		var err error
-		token, err = tasktoken.Generate(s.taskTokenSecret, uuid, s.agentID, 24*time.Hour)
+		token, err = tasktoken.GenerateForWorkflow(s.taskTokenSecret, uuid, s.agentID, workflowID, 24*time.Hour)
 		if err != nil {
 			return fmt.Errorf("failed to generate task token: %w", err)
 		}
+	}
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("authentication token is required")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
 }
 
 func (s *HTTPSender) endpoint(apiPath string) (string, error) {
-	base, err := url.Parse(strings.TrimSpace(s.serverURL))
+	rawBase := strings.TrimSpace(s.serverURL)
+	if rawBase == "" ||
+		strings.HasPrefix(rawBase, "//") ||
+		strings.HasPrefix(rawBase, `\\`) ||
+		strings.Contains(rawBase, `\`) ||
+		strings.ContainsFunc(rawBase, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return "", fmt.Errorf("invalid server URL %q", s.serverURL)
+	}
+	if !strings.HasPrefix(apiPath, "/") ||
+		strings.HasPrefix(apiPath, "//") ||
+		strings.Contains(apiPath, `\`) ||
+		strings.ContainsFunc(apiPath, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return "", fmt.Errorf("invalid API path %q", apiPath)
+	}
+
+	base, err := url.Parse(rawBase)
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return "", fmt.Errorf("invalid server URL %q", s.serverURL)
 	}

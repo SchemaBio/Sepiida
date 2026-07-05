@@ -50,3 +50,14 @@ func TestReloadParsesScopedQueryKey(t *testing.T) {
 		t.Fatal("scope should not allow unconfigured workflow")
 	}
 }
+
+func TestEmptyKeyFileIsAllowedForDisabledKeyManager(t *testing.T) {
+	manager := NewKeyManager("")
+	manager.Start(0)
+	if err := manager.Reload(); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+	if manager.Count() != 0 {
+		t.Fatalf("expected no keys for empty key file, got %v", manager.List())
+	}
+}

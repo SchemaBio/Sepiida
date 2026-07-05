@@ -2,6 +2,8 @@ package state
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,6 +13,7 @@ import (
 )
 
 const StateFileName = ".sepiida.json"
+const maxStateFileBytes = 1 << 20
 
 // WorkflowState represents the monitoring state of a workflow
 type WorkflowState struct {
@@ -48,8 +51,12 @@ func (s *StateManager) LoadState(uuidDir string) (*WorkflowState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if err := validateStateDir(uuidDir); err != nil {
+		return nil, err
+	}
+
 	stateFile := filepath.Join(uuidDir, StateFileName)
-	data, err := os.ReadFile(stateFile)
+	data, err := readStateFile(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil // No previous state
@@ -76,11 +83,104 @@ func (s *StateManager) SaveState(uuidDir string, state *WorkflowState) error {
 		return err
 	}
 
-	return os.WriteFile(stateFile, data, 0644)
+	return writeStateFile(uuidDir, stateFile, data)
+}
+
+func readStateFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to read symlink state file: %s", path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("state file is not a regular file: %s", path)
+	}
+	if info.Size() > maxStateFileBytes {
+		return nil, fmt.Errorf("state file too large: %s", path)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxStateFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxStateFileBytes {
+		return nil, fmt.Errorf("state file too large: %s", path)
+	}
+	return data, nil
+}
+
+func writeStateFile(uuidDir string, stateFile string, data []byte) error {
+	if len(data) > maxStateFileBytes {
+		return fmt.Errorf("state file too large: %s", stateFile)
+	}
+	if err := validateStateDir(uuidDir); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(stateFile); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to overwrite symlink state file: %s", stateFile)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("state file is not a regular file: %s", stateFile)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(uuidDir, StateFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, stateFile); err != nil {
+		if info, statErr := os.Lstat(stateFile); statErr == nil && info.Mode().IsRegular() {
+			if removeErr := os.Remove(stateFile); removeErr != nil {
+				return err
+			}
+			return os.Rename(tmpName, stateFile)
+		}
+		return err
+	}
+	return nil
+}
+
+func validateStateDir(uuidDir string) error {
+	info, err := os.Lstat(uuidDir)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to use symlink state directory: %s", uuidDir)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("state directory is not a directory: %s", uuidDir)
+	}
+	return nil
 }
 
 // HasStateChanged checks if workflow state has changed from previous
-func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir string, workflow *model.Workflow, tasks []model.Task, logFileInfo os.FileInfo) (bool, *WorkflowState) {
+func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir string, workflow *model.Workflow, tasks []model.Task, logFileInfo os.FileInfo, archiveEnabled bool) (bool, *WorkflowState) {
 	prevState, err := s.LoadState(uuidDir)
 	if err != nil || prevState == nil {
 		// No previous state, need to push
@@ -113,7 +213,7 @@ func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir
 	}
 
 	// Check if outputs need to be archived
-	if workflow.Status == model.WorkflowStatusSuccess && !prevState.Archived {
+	if archiveEnabled && workflow.Status == model.WorkflowStatusSuccess && !prevState.Archived {
 		return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 	}
 

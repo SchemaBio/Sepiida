@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -168,6 +169,8 @@ func (p *LogParser) ParseWorkflowDone(line string) (*WorkflowEvent, error) {
 
 // ParseLogFile parses entire log file and returns current state
 func (p *LogParser) ParseLogFile(filePath string) (*model.Workflow, []model.Task, error) {
+	p.workflowID = ""
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, nil, err
@@ -220,8 +223,15 @@ func (p *LogParser) ParseLogFile(filePath string) (*model.Workflow, []model.Task
 	}
 
 	// Apply task events to tasks
+	jobNames := make([]string, 0, len(taskMap))
+	for jobName := range taskMap {
+		jobNames = append(jobNames, jobName)
+	}
+	sort.Strings(jobNames)
+
 	var tasks []model.Task
-	for jobName, task := range taskMap {
+	for _, jobName := range jobNames {
+		task := taskMap[jobName]
 		events := taskEvents[jobName]
 		for _, event := range events {
 			switch event.EventType {
@@ -235,6 +245,16 @@ func (p *LogParser) ParseLogFile(filePath string) (*model.Workflow, []model.Task
 			}
 		}
 		tasks = append(tasks, *task)
+	}
+
+	if workflow != nil && workflow.Status == model.WorkflowStatusRunning {
+		for _, task := range tasks {
+			if task.Status == model.TaskStatusFailed {
+				workflow.Status = model.WorkflowStatusFailed
+				workflow.EndTime = task.EndTime
+				break
+			}
+		}
 	}
 
 	return workflow, tasks, scanner.Err()

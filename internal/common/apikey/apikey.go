@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const maxKeyFileLineBytes = 1 << 20
+
 // KeyManager manages API keys from a dynamic key file
 type KeyManager struct {
 	keyFile     string
@@ -58,8 +60,15 @@ func NewKeyManager(keyFile string) *KeyManager {
 // Start starts the key file watcher
 // It periodically checks the key file for updates
 func (km *KeyManager) Start(interval time.Duration) {
+	if strings.TrimSpace(km.keyFile) == "" {
+		return
+	}
 	// Load keys immediately
 	km.loadKeys()
+	if interval <= 0 {
+		log.Printf("Warning: non-positive key refresh interval %v; key auto-refresh disabled", interval)
+		return
+	}
 
 	// Start periodic refresh
 	go func() {
@@ -75,6 +84,9 @@ func (km *KeyManager) Start(interval time.Duration) {
 // loadKeys loads keys from the key file
 // It checks file modification time to avoid unnecessary reloads
 func (km *KeyManager) loadKeys() {
+	if strings.TrimSpace(km.keyFile) == "" {
+		return
+	}
 	info, err := os.Stat(km.keyFile)
 	if err != nil {
 		// File doesn't exist or inaccessible, keep existing keys
@@ -102,6 +114,7 @@ func (km *KeyManager) loadKeys() {
 
 	newKeys := make(map[string]KeyScope)
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), maxKeyFileLineBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		// Skip empty lines and comments

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SchemaBio/Sepiida/internal/agent/pathsafe"
 )
 
 // LocalBackend archives files to a local filesystem directory.
@@ -28,8 +30,12 @@ func NewLocalBackend(baseDir string) (*LocalBackend, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create local archive path: %w", err)
 	}
+	realBase, err := pathsafe.RealPath(abs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve local archive path: %w", err)
+	}
 
-	return &LocalBackend{baseDir: filepath.Clean(abs)}, nil
+	return &LocalBackend{baseDir: realBase}, nil
 }
 
 func (b *LocalBackend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {
@@ -37,13 +43,16 @@ func (b *LocalBackend) Upload(ctx context.Context, key string, reader io.Reader,
 		return err
 	}
 
-	dst, err := b.resolveKey(key)
+	dst, cleanKey, err := b.resolveKey(key)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := b.ensureRelativeDir(filepath.Dir(cleanKey)); err != nil {
 		return fmt.Errorf("failed to create archive directory: %w", err)
+	}
+	if _, err := pathsafe.ResolveExistingWithin(b.baseDir, filepath.Dir(dst)); err != nil {
+		return fmt.Errorf("archive directory escapes base directory: %w", err)
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".sepiida-*")
@@ -75,20 +84,65 @@ func (b *LocalBackend) Close() error {
 	return nil
 }
 
-func (b *LocalBackend) resolveKey(key string) (string, error) {
+func (b *LocalBackend) resolveKey(key string) (string, string, error) {
+	if _, err := validateObjectKey("archive key", key); err != nil {
+		return "", "", err
+	}
 	key = strings.TrimPrefix(filepath.ToSlash(key), "/")
 	cleanKey := filepath.Clean(filepath.FromSlash(key))
 	if cleanKey == "." || strings.HasPrefix(cleanKey, ".."+string(os.PathSeparator)) || cleanKey == ".." || filepath.IsAbs(cleanKey) {
-		return "", fmt.Errorf("invalid archive key %q", key)
+		return "", "", fmt.Errorf("invalid archive key %q", key)
 	}
 
 	dst := filepath.Join(b.baseDir, cleanKey)
 	rel, err := filepath.Rel(b.baseDir, dst)
 	if err != nil {
-		return "", fmt.Errorf("failed to validate archive key: %w", err)
+		return "", "", fmt.Errorf("failed to validate archive key: %w", err)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("archive key escapes base directory: %q", key)
+		return "", "", fmt.Errorf("archive key escapes base directory: %q", key)
 	}
-	return dst, nil
+	return dst, cleanKey, nil
+}
+
+func (b *LocalBackend) ensureRelativeDir(relDir string) error {
+	if relDir == "." || relDir == "" {
+		return nil
+	}
+	if filepath.IsAbs(relDir) || relDir == ".." || strings.HasPrefix(relDir, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("invalid archive directory %q", relDir)
+	}
+
+	current := b.baseDir
+	for _, segment := range strings.Split(relDir, string(os.PathSeparator)) {
+		if segment == "" || segment == "." {
+			continue
+		}
+		if segment == ".." {
+			return fmt.Errorf("invalid archive directory segment %q", segment)
+		}
+		current = filepath.Join(current, segment)
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("refusing to use symlink archive directory: %s", current)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("archive path component is not a directory: %s", current)
+			}
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Mkdir(current, 0o755); err != nil && !os.IsExist(err) {
+			return err
+		}
+		if info, err := os.Lstat(current); err != nil {
+			return err
+		} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("archive path component is not a safe directory: %s", current)
+		}
+	}
+	return nil
 }

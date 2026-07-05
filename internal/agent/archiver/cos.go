@@ -36,8 +36,15 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("cos:// URL must be in format: cos://<region>/<bucket>[/prefix]")
 		}
-		region = parts[0]
-		bucket = parts[1]
+		var err error
+		region, err = validateArchiveComponent("region", parts[0])
+		if err != nil {
+			return nil, err
+		}
+		bucket, err = validateArchiveComponent("bucket", parts[1])
+		if err != nil {
+			return nil, err
+		}
 		if len(parts) > 2 {
 			prefix = strings.TrimSuffix(parts[2], "/")
 		}
@@ -53,11 +60,24 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return nil, fmt.Errorf("invalid COS virtual-hosted domain: %s", host)
 		}
-		bucket = parts[0]
+		var componentErr error
+		bucket, componentErr = validateArchiveComponent("bucket", parts[0])
+		if componentErr != nil {
+			return nil, componentErr
+		}
 		regionPart := parts[1] // ap-guangzhou.myqcloud.com
-		region = strings.TrimSuffix(regionPart, ".myqcloud.com")
+		region, componentErr = validateArchiveComponent("region", strings.TrimSuffix(regionPart, ".myqcloud.com"))
+		if componentErr != nil {
+			return nil, componentErr
+		}
 		prefix = strings.TrimPrefix(u.Path, "/")
 		prefix = strings.TrimSuffix(prefix, "/")
+	}
+
+	var err error
+	prefix, err = normalizeObjectPrefix(prefix)
+	if err != nil {
+		return nil, err
 	}
 
 	bucketURLStr := fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
@@ -98,9 +118,9 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 }
 
 func (b *COSBackend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {
-	objectKey := key
-	if b.prefix != "" {
-		objectKey = b.prefix + "/" + key
+	objectKey, err := joinObjectKey(b.prefix, key)
+	if err != nil {
+		return err
 	}
 
 	// For large files (>5MB), use multipart upload
@@ -114,7 +134,7 @@ func (b *COSBackend) Upload(ctx context.Context, key string, reader io.Reader, s
 			ContentLength: size,
 		},
 	}
-	_, err := b.client.Object.Put(ctx, objectKey, reader, opt)
+	_, err = b.client.Object.Put(ctx, objectKey, reader, opt)
 	if err != nil {
 		return fmt.Errorf("failed to upload %s: %w", objectKey, err)
 	}

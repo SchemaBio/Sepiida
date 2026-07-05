@@ -60,25 +60,32 @@ func buildSingleFileParquet(filePath string) ([]byte, []string, error) {
 		return nil, nil, fmt.Errorf("no data rows found")
 	}
 
-	// Build dynamic Parquet schema from headers
-	schema := buildDynamicSchema(headers)
+	safeHeaders := uniqueColumnNames(headers)
+
+	// Build dynamic Parquet schema from sanitized, unique headers
+	schema := buildDynamicSchema(safeHeaders)
 
 	// Write rows to Parquet
 	var buf bytes.Buffer
 	writer := parquet.NewWriter(&buf, schema)
 
+	writtenRows := 0
 	for _, row := range rows {
 		if err := writer.Write(row); err != nil {
 			log.Printf("Warning: failed to write row: %v", err)
 			continue
 		}
+		writtenRows++
 	}
 
 	if err := writer.Close(); err != nil {
 		return nil, nil, fmt.Errorf("failed to close parquet writer: %w", err)
 	}
+	if writtenRows == 0 {
+		return nil, nil, fmt.Errorf("no rows could be written")
+	}
 
-	return buf.Bytes(), headers, nil
+	return buf.Bytes(), safeHeaders, nil
 }
 
 // buildDynamicSchema creates a Parquet schema from column names.
@@ -87,10 +94,8 @@ func buildDynamicSchema(columns []string) *parquet.Schema {
 	// Create a Group (map of column name -> Node)
 	group := make(parquet.Group)
 	for _, col := range columns {
-		// Sanitize column name for Parquet (replace special characters)
-		safeName := sanitizeColumnName(col)
 		// Each column is an optional string
-		group[safeName] = parquet.Optional(parquet.String())
+		group[col] = parquet.Optional(parquet.String())
 	}
 
 	return parquet.NewSchema("text_file", group)
@@ -109,7 +114,36 @@ func sanitizeColumnName(name string) string {
 		}
 		return '_'
 	}, name)
+	result = strings.Trim(result, "_")
+	if result == "" {
+		return "column"
+	}
+	if result[0] >= '0' && result[0] <= '9' {
+		return "col_" + result
+	}
 	return result
+}
+
+// uniqueColumnNames sanitizes headers and makes duplicate column names stable.
+// Parquet schemas are maps keyed by field name; without de-duplication headers
+// such as "gene-id" and "gene_id" silently collapse into one column.
+func uniqueColumnNames(headers []string) []string {
+	names := make([]string, 0, len(headers))
+	seen := make(map[string]int, len(headers))
+	for i, header := range headers {
+		name := sanitizeColumnName(header)
+		if strings.TrimSpace(header) == "" {
+			name = fmt.Sprintf("column_%d", i+1)
+		}
+		if count := seen[name]; count > 0 {
+			seen[name] = count + 1
+			name = fmt.Sprintf("%s_%d", name, count+1)
+		} else {
+			seen[name] = 1
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // detectDelimiter analyzes the first few lines to determine the delimiter.
@@ -144,8 +178,8 @@ func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map
 	reader.TrimLeadingSpace = true
 
 	var headers []string
+	var safeHeaders []string
 	var rows []map[string]string
-	lineNum := 0
 
 	for {
 		record, err := reader.Read()
@@ -156,29 +190,28 @@ func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map
 			continue // Skip malformed lines
 		}
 
-		lineNum++
-
 		// Skip empty lines
 		if len(record) == 0 || (len(record) == 1 && strings.TrimSpace(record[0]) == "") {
 			continue
 		}
 
-		if lineNum == 1 {
-			// First line is header
+		if headers == nil {
+			// First non-empty line is header
 			headers = record
+			safeHeaders = uniqueColumnNames(headers)
 			continue
 		}
 
 		// Build row map with sanitized column names matching the schema
 		row := make(map[string]string)
 		for i, val := range record {
-			if i < len(headers) {
-				safeCol := sanitizeColumnName(headers[i])
-				row[safeCol] = val
-			} else {
-				// Extra columns beyond header
-				row[fmt.Sprintf("col_%d", i)] = val
+			if i >= len(safeHeaders) {
+				// Ignore overflow columns. The Parquet schema is derived from
+				// the header, and adding ad-hoc fields here can make the whole
+				// row fail to write for malformed CSV/TSV lines.
+				break
 			}
+			row[safeHeaders[i]] = val
 		}
 
 		rows = append(rows, row)

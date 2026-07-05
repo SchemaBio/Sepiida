@@ -32,7 +32,7 @@ func TestHasStateChangedResetsIdempotencyFlagsForNewExecution(t *testing.T) {
 		Status: model.WorkflowStatusSuccess,
 	}
 
-	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-2"), workflow, nil, info)
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-2"), workflow, nil, info, true)
 	if !changed {
 		t.Fatal("expected new execution to be pushed")
 	}
@@ -71,7 +71,7 @@ func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) 
 		Status: model.WorkflowStatusSuccess,
 	}
 
-	changed, next := manager.HasStateChanged(dir, "sample-uuid", executionDir, workflow, nil, info)
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", executionDir, workflow, nil, info, true)
 	if !changed {
 		t.Fatal("expected log size change to trigger push")
 	}
@@ -96,12 +96,38 @@ func TestHasStateChangedDoesNotMarkOutputsPushedBeforeSendSuccess(t *testing.T) 
 		OutputsJSON: `{"result":"ok"}`,
 	}
 
-	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-1"), workflow, nil, info)
+	changed, next := manager.HasStateChanged(dir, "sample-uuid", filepath.Join(dir, "run-1"), workflow, nil, info, false)
 	if !changed {
 		t.Fatal("expected completed workflow to be pushed")
 	}
 	if next.OutputsPushed {
 		t.Fatalf("outputs were marked pushed before send success: %+v", next)
+	}
+}
+
+func TestStateManagerRefusesSymlinkStateDirectory(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("failed to create real state dir: %v", err)
+	}
+	linkDir := filepath.Join(root, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink creation is not available: %v", err)
+	}
+
+	manager := NewStateManager()
+	state := &WorkflowState{
+		UUID:           "sample-uuid",
+		WorkflowID:     "run-1",
+		WorkflowStatus: model.WorkflowStatusRunning,
+		ExecutionDir:   filepath.Join(realDir, "run-1"),
+	}
+	if err := manager.SaveState(linkDir, state); err == nil {
+		t.Fatal("expected SaveState to reject symlink state directory")
+	}
+	if _, err := manager.LoadState(linkDir); err == nil {
+		t.Fatal("expected LoadState to reject symlink state directory")
 	}
 }
 

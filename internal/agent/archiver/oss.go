@@ -12,11 +12,11 @@ import (
 
 // OSSBackend archives files to Alibaba Cloud OSS using the official SDK.
 type OSSBackend struct {
-	client   *oss.Client
-	bucket   *oss.Bucket
+	client     *oss.Client
+	bucket     *oss.Bucket
 	bucketName string
-	prefix   string
-	endpoint string // e.g. oss-cn-guangzhou.aliyuncs.com
+	prefix     string
+	endpoint   string // e.g. oss-cn-guangzhou.aliyuncs.com
 }
 
 // NewOSSBackend creates an Alibaba Cloud OSS archive backend.
@@ -33,8 +33,15 @@ func NewOSSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 		if len(parts) < 2 {
 			return nil, fmt.Errorf("oss:// URL must be in format: oss://<region>/<bucket>[/prefix]")
 		}
-		region = parts[0]
-		bucketName = parts[1]
+		var err error
+		region, err = validateArchiveComponent("region", parts[0])
+		if err != nil {
+			return nil, err
+		}
+		bucketName, err = validateArchiveComponent("bucket", parts[1])
+		if err != nil {
+			return nil, err
+		}
 		if len(parts) > 2 {
 			prefix = strings.TrimSuffix(parts[2], "/")
 		}
@@ -46,11 +53,24 @@ func NewOSSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return nil, fmt.Errorf("invalid OSS virtual-hosted domain: %s", host)
 		}
-		bucketName = parts[0]
+		var err error
+		bucketName, err = validateArchiveComponent("bucket", parts[0])
+		if err != nil {
+			return nil, err
+		}
 		regionPart := parts[1] // cn-guangzhou.aliyuncs.com
-		region = strings.TrimSuffix(regionPart, ".aliyuncs.com")
+		region, err = validateArchiveComponent("region", strings.TrimSuffix(regionPart, ".aliyuncs.com"))
+		if err != nil {
+			return nil, err
+		}
 		path := strings.TrimPrefix(strings.SplitN(rawURL, host, 2)[1], "/")
 		prefix = strings.TrimSuffix(path, "/")
+	}
+
+	var err error
+	prefix, err = normalizeObjectPrefix(prefix)
+	if err != nil {
+		return nil, err
 	}
 
 	endpoint := "oss-" + region + ".aliyuncs.com"
@@ -85,9 +105,9 @@ func NewOSSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 }
 
 func (b *OSSBackend) Upload(ctx context.Context, key string, reader io.Reader, size int64) error {
-	objectKey := key
-	if b.prefix != "" {
-		objectKey = b.prefix + "/" + key
+	objectKey, err := joinObjectKey(b.prefix, key)
+	if err != nil {
+		return err
 	}
 
 	if err := ctx.Err(); err != nil {

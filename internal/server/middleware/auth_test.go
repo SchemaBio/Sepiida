@@ -12,13 +12,15 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
 
+const testTaskTokenSecret = "0123456789abcdef0123456789abcdef"
+
 func TestAgentAuthAcceptsTaskTokenAndSetsClaims(t *testing.T) {
-	token, err := tasktoken.Generate("shared-secret", "sample-uuid", "agent-1", time.Hour)
+	token, err := tasktoken.Generate(testTaskTokenSecret, "sample-uuid", "agent-1", time.Hour)
 	if err != nil {
 		t.Fatalf("Generate returned error: %v", err)
 	}
 
-	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), "shared-secret", false)
+	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
 	nextCalled := false
 	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
@@ -42,6 +44,43 @@ func TestAgentAuthAcceptsTaskTokenAndSetsClaims(t *testing.T) {
 	}
 }
 
+func TestAgentAuthAcceptsCaseInsensitiveBearer(t *testing.T) {
+	token, err := tasktoken.Generate(testTaskTokenSecret, "sample-uuid", "agent-1", time.Hour)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/progress", nil)
+	req.Header.Set("Authorization", "bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected lowercase bearer to pass, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAgentAuthRejectsAmbiguousAuthorizationHeader(t *testing.T) {
+	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("ambiguous authorization header should not reach next handler")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/progress", nil)
+	req.Header.Set("Authorization", "Bearer token extra")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAgentAuthRejectsStaticKeyWhenDisabled(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
 	if err := os.WriteFile(keyFile, []byte("agent-key\n"), 0o644); err != nil {
@@ -52,7 +91,7 @@ func TestAgentAuthRejectsStaticKeyWhenDisabled(t *testing.T) {
 		t.Fatalf("Reload returned error: %v", err)
 	}
 
-	middleware := NewAgentAuthMiddleware(keyMgr, "shared-secret", false)
+	middleware := NewAgentAuthMiddleware(keyMgr, testTaskTokenSecret, false)
 	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("static key should not reach next handler")
 	}))

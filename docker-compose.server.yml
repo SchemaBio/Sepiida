@@ -4,9 +4,10 @@ version: "3.8"
 # Sepiida — Server only (no agent, no Postgres)
 #
 # Before starting:
-#   1. Copy agent-keys.example -> agent-keys.txt and set real keys
-#   2. Copy query-keys.example -> query-keys.txt and set real keys
-#   3. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
+#   1. Copy query-keys.example -> query-keys.txt and set real keys
+#   2. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
+#   3. Set SEPIIDA_TASK_TOKEN_SECRET to the same long random secret used by Squid
+#      (or explicitly enable and mount static agent keys for legacy/local writes).
 #
 # Usage:
 #   docker compose -f docker-compose.server.yml build
@@ -23,15 +24,15 @@ services:
     restart: unless-stopped
     command:
       - "-p=9090"
-      - "-d=${DATABASE_URL}"
-      - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
       - "-query-key=/etc/sepiida/keys/query-keys.txt"
-      - "-key-refresh=${SEPIIDA_KEY_REFRESH_SECONDS:-30}"
-      - "-task-token-secret=${SEPIIDA_TASK_TOKEN_SECRET:-}"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SEPIIDA_KEY_REFRESH_SECONDS: ${SEPIIDA_KEY_REFRESH_SECONDS:-30}
+      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_TASK_TOKEN_SECRET}
+      SEPIIDA_ALLOW_STATIC_AGENT_KEY: ${SEPIIDA_ALLOW_STATIC_AGENT_KEY:-false}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
-      - ${SEPIIDA_AGENT_KEYS_FILE:-./agent-keys.txt}:/etc/sepiida/keys/agent-keys.txt:ro
       - ${SEPIIDA_QUERY_KEYS_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
 
 networks:

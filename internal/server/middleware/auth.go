@@ -38,9 +38,10 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Parse Bearer token
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		// Parse Bearer token. Auth schemes are case-insensitive; Fields also
+		// rejects empty tokens and ambiguous extra fields.
+		parts := strings.Fields(authHeader)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			http.Error(w, "invalid authorization format", http.StatusUnauthorized)
 			return
 		}
@@ -110,9 +111,10 @@ func (q *QueryAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Parse Bearer token
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		// Parse Bearer token. Auth schemes are case-insensitive; Fields also
+		// rejects empty tokens and ambiguous extra fields.
+		parts := strings.Fields(authHeader)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			http.Error(w, "invalid authorization format", http.StatusUnauthorized)
 			return
 		}

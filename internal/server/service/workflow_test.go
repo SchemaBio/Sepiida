@@ -64,9 +64,10 @@ func (f *fakeDB) MarkArchived(ctx context.Context, result *model.ArchiveResult) 
 			updated.KeyPrefix = cp.KeyPrefix
 			updated.ArchivedCount = cp.ArchivedCount
 			f.workflows[workflowID] = &updated
+			return nil
 		}
 	}
-	return nil
+	return ErrWorkflowNotFound
 }
 
 func (f *fakeDB) GetWorkflow(ctx context.Context, id string) (*model.Workflow, error) {
@@ -169,15 +170,62 @@ func TestProcessProgressCreatesNewExecutionForSameUUID(t *testing.T) {
 	if _, ok := db.workflows["run-1"]; !ok {
 		t.Fatal("old execution was removed")
 	}
-	if workflow, ok := db.workflows["run-2"]; !ok {
+	storedRun2ID := "sample-uuid:run-2"
+	if workflow, ok := db.workflows[storedRun2ID]; !ok {
 		t.Fatal("new execution was not created")
 	} else if workflow.UUID != "sample-uuid" || workflow.AgentID != "agent-1" {
 		t.Fatalf("new execution not normalized: %+v", workflow)
 	}
-	if task, ok := db.tasks["run-2_call-Task"]; !ok {
+	if task, ok := db.tasks[storedRun2ID+"_call-Task"]; !ok {
 		t.Fatal("task for new execution was not created")
-	} else if task.WorkflowID != "run-2" {
+	} else if task.WorkflowID != storedRun2ID {
 		t.Fatalf("task points at wrong workflow: %+v", task)
+	}
+}
+
+func TestProcessProgressSeparatesSameRunIDAcrossUUIDs(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+
+	makeProgress := func(uuid string) *model.WorkflowProgress {
+		return &model.WorkflowProgress{
+			AgentID: "agent-1",
+			UUID:    uuid,
+			Workflow: model.Workflow{
+				ID:     "20260705_120000_SingleWES",
+				Name:   "SingleWES",
+				Status: model.WorkflowStatusRunning,
+			},
+			Tasks: []model.Task{{
+				Name:    "Task",
+				JobName: "call-Task",
+				Status:  model.TaskStatusRunning,
+			}},
+		}
+	}
+
+	if err := service.ProcessProgress(ctx, makeProgress("sample-a")); err != nil {
+		t.Fatalf("first ProcessProgress returned error: %v", err)
+	}
+	if err := service.ProcessProgress(ctx, makeProgress("sample-b")); err != nil {
+		t.Fatalf("second ProcessProgress returned error: %v", err)
+	}
+
+	if _, ok := db.workflows["sample-a:20260705_120000_SingleWES"]; !ok {
+		t.Fatalf("sample-a workflow missing: keys=%v", mapKeys(db.workflows))
+	}
+	if _, ok := db.workflows["sample-b:20260705_120000_SingleWES"]; !ok {
+		t.Fatalf("sample-b workflow missing: keys=%v", mapKeys(db.workflows))
+	}
+	if len(db.workflows) != 2 {
+		t.Fatalf("same run ID should create two stored executions, got %d", len(db.workflows))
+	}
+	if _, ok := db.tasks["sample-a:20260705_120000_SingleWES_call-Task"]; !ok {
+		t.Fatalf("sample-a task missing: keys=%v", mapKeys(db.tasks))
+	}
+	if _, ok := db.tasks["sample-b:20260705_120000_SingleWES_call-Task"]; !ok {
+		t.Fatalf("sample-b task missing: keys=%v", mapKeys(db.tasks))
 	}
 }
 
@@ -223,10 +271,48 @@ func TestProcessProgressPreservesArchiveFieldsOnUpdate(t *testing.T) {
 	}
 }
 
+func TestProcessProgressPreservesExistingOutputsJSONWhenProgressOmitsIt(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+	db.workflows["run-1"] = &model.Workflow{
+		ID:          "run-1",
+		UUID:        "sample-uuid",
+		Name:        "Workflow",
+		Status:      model.WorkflowStatusSuccess,
+		OutputsJSON: `{"bam":"/data/output/sample-uuid/run-1/result.bam"}`,
+		CreatedAt:   time.Now().Add(-time.Minute),
+	}
+
+	progress := &model.WorkflowProgress{
+		AgentID: "agent-1",
+		UUID:    "sample-uuid",
+		Workflow: model.Workflow{
+			ID:     "run-1",
+			Name:   "Workflow",
+			Status: model.WorkflowStatusSuccess,
+		},
+	}
+
+	if err := service.ProcessProgress(ctx, progress); err != nil {
+		t.Fatalf("ProcessProgress returned error: %v", err)
+	}
+	if got := db.workflows["run-1"].OutputsJSON; got != `{"bam":"/data/output/sample-uuid/run-1/result.bam"}` {
+		t.Fatalf("outputs_json was not preserved: %q", got)
+	}
+}
+
 func TestMarkArchivedNormalizesAliases(t *testing.T) {
 	ctx := context.Background()
 	db := newFakeDB()
 	service := NewWorkflowService(db)
+	db.workflows["run-1"] = &model.Workflow{
+		ID:        "run-1",
+		UUID:      "sample-uuid",
+		Name:      "Workflow",
+		Status:    model.WorkflowStatusSuccess,
+		CreatedAt: time.Now(),
+	}
 
 	err := service.MarkArchived(ctx, &model.ArchiveResult{
 		UUID:      "sample-uuid",
@@ -282,4 +368,41 @@ func TestMarkArchivedTargetsWorkflowID(t *testing.T) {
 	if db.workflows["run-2"].Archived {
 		t.Fatalf("latest workflow was incorrectly marked archived: %+v", db.workflows["run-2"])
 	}
+}
+
+func TestProcessOutputRejectsUnknownWorkflow(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+
+	err := service.ProcessOutput(ctx, &model.WorkflowOutputRequest{
+		UUID:        "sample-uuid",
+		WorkflowID:  "run-1",
+		OutputsJSON: `{"ok":true}`,
+	})
+	if err != ErrWorkflowNotFound {
+		t.Fatalf("expected ErrWorkflowNotFound, got %v", err)
+	}
+}
+
+func TestMarkArchivedRejectsUnknownWorkflow(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+
+	err := service.MarkArchived(ctx, &model.ArchiveResult{
+		UUID:       "sample-uuid",
+		WorkflowID: "run-1",
+	})
+	if err != ErrWorkflowNotFound {
+		t.Fatalf("expected ErrWorkflowNotFound, got %v", err)
+	}
+}
+
+func mapKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	return keys
 }

@@ -45,11 +45,46 @@ func TestCollectReadsWorkflowOutputsAndTaskLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadState returned error: %v", err)
 	}
+	if state != nil {
+		t.Fatalf("state should not be saved before SendProgress succeeds: %+v", state)
+	}
+	if err := collector.SaveState(result.UUIDDir, result.State); err != nil {
+		t.Fatalf("SaveState returned error: %v", err)
+	}
+	state, err = collector.LoadState(result.UUIDDir)
+	if err != nil {
+		t.Fatalf("LoadState after SaveState returned error: %v", err)
+	}
 	if state == nil {
-		t.Fatal("expected state file to be saved")
+		t.Fatal("expected state file to be saved after successful push")
 	}
 	if state.OutputsPushed {
 		t.Fatalf("outputs should not be marked pushed before SendOutput succeeds: %+v", state)
+	}
+}
+
+func TestCollectDoesNotPersistStateBeforeSuccessfulPush(t *testing.T) {
+	watchDir := t.TempDir()
+	uuid := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	setupCollectorWorkflow(t, watchDir, uuid, "20260428_094955_SingleWES")
+
+	collector := NewProgressCollector(parser.NewLogParser(), []string{watchDir}, "agent-1")
+	results, err := collector.Collect()
+	if err != nil {
+		t.Fatalf("first Collect returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected first collect to push, got %d", len(results))
+	}
+
+	// Simulate a network/server failure by not calling SaveState. The next poll
+	// must retry the same update instead of treating it as already pushed.
+	results, err = collector.Collect()
+	if err != nil {
+		t.Fatalf("second Collect returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected retry when previous push was not persisted, got %d", len(results))
 	}
 }
 
@@ -65,6 +100,9 @@ func TestCollectRetriesOutputsUntilMarkedPushed(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("expected first collect to push, got %d", len(results))
+	}
+	if err := collector.SaveState(results[0].UUIDDir, results[0].State); err != nil {
+		t.Fatalf("SaveState returned error: %v", err)
 	}
 
 	results, err = collector.Collect()
@@ -85,11 +123,53 @@ func TestCollectRetriesOutputsUntilMarkedPushed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("third Collect returned error: %v", err)
 	}
+	if len(results) != 0 {
+		t.Fatalf("expected no retry when archiving is disabled, got %d", len(results))
+	}
+}
+
+func TestCollectRetriesArchiveWhenArchiveEnabled(t *testing.T) {
+	watchDir := t.TempDir()
+	uuid := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	setupCollectorWorkflow(t, watchDir, uuid, "20260428_094955_SingleWES")
+
+	collector := NewProgressCollector(parser.NewLogParser(), []string{watchDir}, "agent-1")
+	collector.SetArchiveEnabled(true)
+
+	results, err := collector.Collect()
+	if err != nil {
+		t.Fatalf("first Collect returned error: %v", err)
+	}
 	if len(results) != 1 {
-		t.Fatalf("expected archive retry to still push until archived, got %d", len(results))
+		t.Fatalf("expected first collect to push, got %d", len(results))
+	}
+	if err := collector.SaveState(results[0].UUIDDir, results[0].State); err != nil {
+		t.Fatalf("SaveState returned error: %v", err)
+	}
+	if err := collector.MarkOutputsPushed(results[0].UUIDDir); err != nil {
+		t.Fatalf("MarkOutputsPushed returned error: %v", err)
+	}
+
+	results, err = collector.Collect()
+	if err != nil {
+		t.Fatalf("second Collect returned error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected archive retry while archive is enabled, got %d", len(results))
 	}
 	if results[0].Progress.Workflow.OutputsJSON != "" {
 		t.Fatalf("outputs should not be reread after MarkOutputsPushed: %+v", results[0].Progress.Workflow)
+	}
+
+	if err := collector.MarkArchived(results[0].UUIDDir); err != nil {
+		t.Fatalf("MarkArchived returned error: %v", err)
+	}
+	results, err = collector.Collect()
+	if err != nil {
+		t.Fatalf("third Collect returned error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected no retry after MarkArchived, got %d", len(results))
 	}
 }
 
@@ -151,6 +231,35 @@ func TestResolveOutputsJSONDoesNotResolveOversizedNestedJSON(t *testing.T) {
 	}
 	if parsed["manifest"] != nestedJSON {
 		t.Fatalf("oversized nested JSON path should be preserved, got %q want %q", parsed["manifest"], nestedJSON)
+	}
+}
+
+func TestResolveOutputsJSONStopsSelfReferentialNestedJSON(t *testing.T) {
+	execDir := t.TempDir()
+	nestedJSON := filepath.Join(execDir, "nested.json")
+	writeCollectorTestJSON(t, nestedJSON, map[string]string{"self": nestedJSON})
+	outputsPath := filepath.Join(execDir, "outputs.json")
+	writeCollectorTestJSON(t, outputsPath, map[string]string{"manifest": nestedJSON})
+
+	resolved, err := resolveOutputsJSON(outputsPath, execDir)
+	if err != nil {
+		t.Fatalf("resolveOutputsJSON returned error: %v", err)
+	}
+	if !strings.Contains(resolved, "nested.json") {
+		t.Fatalf("cycle path should be preserved once recursion stops: %s", resolved)
+	}
+	if len(resolved) > 4096 {
+		t.Fatalf("self-referential JSON expanded unexpectedly, len=%d", len(resolved))
+	}
+}
+
+func TestResolveLastFileRejectsLargePointer(t *testing.T) {
+	uuidDir := t.TempDir()
+	lastPath := filepath.Join(uuidDir, "_LAST")
+	writeCollectorTestFile(t, lastPath, strings.Repeat("x", maxLastPointerBytes+1))
+
+	if _, err := resolveSymlink(lastPath, uuidDir); err == nil {
+		t.Fatal("expected oversized _LAST file pointer to be rejected")
 	}
 }
 
