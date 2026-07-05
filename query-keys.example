@@ -2,7 +2,8 @@
 # Keys used to query workflow results
 # One key per line, lines starting with # are comments
 
-# Example query keys:
+# Example query keys below are placeholders and are ignored by the server.
+# Replace them with long random values before deployment:
 query-key-001
 query-key-002
 query-key-003

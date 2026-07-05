@@ -41,7 +41,7 @@ func TestHandleListWorkflowsCapsLimit(t *testing.T) {
 
 func TestHandleListWorkflowsRejectsScopedQueryKey(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("scoped-key uuid=workflow-uuid\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("scoped-key-012345 uuid=workflow-uuid\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -55,7 +55,7 @@ func TestHandleListWorkflowsRejectsScopedQueryKey(t *testing.T) {
 	authenticated := middleware.NewQueryAuthMiddleware(keyMgr).Middleware(http.HandlerFunc(handler.HandleListWorkflows))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflows", nil)
-	req.Header.Set("Authorization", "Bearer scoped-key")
+	req.Header.Set("Authorization", "Bearer scoped-key-012345")
 	rec := httptest.NewRecorder()
 
 	authenticated.ServeHTTP(rec, req)
@@ -225,7 +225,7 @@ func TestHandleOutputRejectsInvalidOutputsJSON(t *testing.T) {
 
 func TestHandleGetWorkflowWithScopedKeyDoesNotLeakUnscopedMisses(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("scoped-key workflow=allowed-run\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("scoped-key-012345 workflow=allowed-run\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -239,7 +239,7 @@ func TestHandleGetWorkflowWithScopedKeyDoesNotLeakUnscopedMisses(t *testing.T) {
 	authenticated := middleware.NewQueryAuthMiddleware(keyMgr).Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow?id=other-run", nil)
-	req.Header.Set("Authorization", "Bearer scoped-key")
+	req.Header.Set("Authorization", "Bearer scoped-key-012345")
 	rec := httptest.NewRecorder()
 
 	authenticated.ServeHTTP(rec, req)
@@ -251,7 +251,7 @@ func TestHandleGetWorkflowWithScopedKeyDoesNotLeakUnscopedMisses(t *testing.T) {
 
 func TestHandleGetWorkflowWithScopedKeyReturnsNotFoundForScopedMiss(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("scoped-key workflow=allowed-run\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("scoped-key-012345 workflow=allowed-run\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -265,7 +265,7 @@ func TestHandleGetWorkflowWithScopedKeyReturnsNotFoundForScopedMiss(t *testing.T
 	authenticated := middleware.NewQueryAuthMiddleware(keyMgr).Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow?id=allowed-run", nil)
-	req.Header.Set("Authorization", "Bearer scoped-key")
+	req.Header.Set("Authorization", "Bearer scoped-key-012345")
 	rec := httptest.NewRecorder()
 
 	authenticated.ServeHTTP(rec, req)

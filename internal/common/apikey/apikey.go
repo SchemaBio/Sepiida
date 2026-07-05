@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-const maxKeyFileLineBytes = 1 << 20
+const (
+	maxKeyFileLineBytes = 1 << 20
+	minAPIKeyBytes      = 16
+)
 
 // KeyManager manages API keys from a dynamic key file
 type KeyManager struct {
@@ -129,6 +132,14 @@ func (km *KeyManager) loadKeys() error {
 		if key == "" {
 			continue
 		}
+		if isPlaceholderKey(key) {
+			log.Printf("Warning: ignoring placeholder API key in %s; replace example key files before use", km.keyFile)
+			continue
+		}
+		if len(key) < minAPIKeyBytes {
+			log.Printf("Warning: ignoring weak API key in %s; keys must be at least %d bytes", km.keyFile, minAPIKeyBytes)
+			continue
+		}
 		newKeys[key] = scope
 	}
 
@@ -222,6 +233,28 @@ func splitScopeValues(value string) []string {
 		}
 	}
 	return values
+}
+
+func isPlaceholderKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	compact := strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
+	switch compact {
+	case "agentkey001", "agentkey002", "agentkey003",
+		"querykey001", "querykey002", "querykey003":
+		return true
+	}
+	for _, marker := range []string{
+		"changeme",
+		"replacewith",
+		"placeholder",
+		"examplekey",
+		"yourapikey",
+	} {
+		if strings.Contains(compact, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Count returns the number of valid keys

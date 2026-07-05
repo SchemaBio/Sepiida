@@ -83,7 +83,7 @@ func TestAgentAuthRejectsAmbiguousAuthorizationHeader(t *testing.T) {
 
 func TestAgentAuthRejectsStaticKeyWhenDisabled(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("agent-key\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("agent-key-012345\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -97,7 +97,7 @@ func TestAgentAuthRejectsStaticKeyWhenDisabled(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/progress", nil)
-	req.Header.Set("Authorization", "Bearer agent-key")
+	req.Header.Set("Authorization", "Bearer agent-key-012345")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -108,7 +108,7 @@ func TestAgentAuthRejectsStaticKeyWhenDisabled(t *testing.T) {
 
 func TestQueryAuthAcceptsQueryKey(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("query-key\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("query-key-012345\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -124,7 +124,7 @@ func TestQueryAuthAcceptsQueryKey(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflows", nil)
-	req.Header.Set("Authorization", "Bearer query-key")
+	req.Header.Set("Authorization", "Bearer query-key-012345")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -135,7 +135,7 @@ func TestQueryAuthAcceptsQueryKey(t *testing.T) {
 
 func TestQueryAuthSetsScopedKeyContext(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "keys.txt")
-	if err := os.WriteFile(keyFile, []byte("query-key uuid=workflow-uuid\n"), 0o644); err != nil {
+	if err := os.WriteFile(keyFile, []byte("query-key-012345 uuid=workflow-uuid\n"), 0o644); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 	keyMgr := apikey.NewKeyManager(keyFile)
@@ -156,7 +156,7 @@ func TestQueryAuthSetsScopedKeyContext(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workflow?uuid=workflow-uuid", nil)
-	req.Header.Set("Authorization", "Bearer query-key")
+	req.Header.Set("Authorization", "Bearer query-key-012345")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
