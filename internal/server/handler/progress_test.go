@@ -166,6 +166,47 @@ func TestHandleArchiveRejectsOversizedMetadata(t *testing.T) {
 	}
 }
 
+func TestHandleArchiveRejectsUnsafeArchiveMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "script archive base",
+			body: `{"agent_id":"agent-1","uuid":"` + testUUID + `","workflow_id":"run-1","archive_base":"javascript:alert(1)"}`,
+		},
+		{
+			name: "object key traversal",
+			body: `{"agent_id":"agent-1","uuid":"` + testUUID + `","workflow_id":"run-1","outputs_resolved_key":"../outputs.resolved.json"}`,
+		},
+		{
+			name: "double encoded object key traversal",
+			body: `{"agent_id":"agent-1","uuid":"` + testUUID + `","workflow_id":"run-1","outputs_resolved_key":"%252e%252e/outputs.resolved.json"}`,
+		},
+		{
+			name: "archive url query secret",
+			body: `{"agent_id":"agent-1","uuid":"` + testUUID + `","workflow_id":"run-1","archive_base":"https://bucket.example/archive?token=secret"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &listLimitDB{}
+			svc := service.NewWorkflowService(fake)
+			handler := NewProgressHandler(svc)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/workflow/archive", bytes.NewBufferString(tt.body))
+			rec := httptest.NewRecorder()
+
+			handler.HandleArchive(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected bad request, got %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleOutputRejectsInvalidOutputsJSON(t *testing.T) {
 	fake := &listLimitDB{}
 	svc := service.NewWorkflowService(fake)

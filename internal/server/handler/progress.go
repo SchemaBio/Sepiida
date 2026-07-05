@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,8 @@ const (
 
 var safeIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var standardUUIDPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+var schemeLikePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+var windowsDrivePathPattern = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
 
 // NewProgressHandler creates a new progress handler
 func NewProgressHandler(service *service.WorkflowService) *ProgressHandler {
@@ -372,11 +375,11 @@ func validateArchiveResult(w http.ResponseWriter, result *model.ArchiveResult) b
 		http.Error(w, "invalid archived_count", http.StatusBadRequest)
 		return false
 	}
-	return validatePathString(w, "archive_base", result.ArchiveBase) &&
-		validatePathString(w, "base_path", result.BasePath) &&
-		validatePathString(w, "outputs_resolved_key", result.OutputsResolvedKey) &&
-		validatePathString(w, "object_prefix", result.ObjectPrefix) &&
-		validatePathString(w, "key_prefix", result.KeyPrefix)
+	return validateArchiveLocation(w, "archive_base", result.ArchiveBase) &&
+		validateArchiveLocation(w, "base_path", result.BasePath) &&
+		validateObjectKeyField(w, "outputs_resolved_key", result.OutputsResolvedKey) &&
+		validateObjectKeyField(w, "object_prefix", result.ObjectPrefix) &&
+		validateObjectKeyField(w, "key_prefix", result.KeyPrefix)
 }
 
 func validWorkflowStatus(status model.WorkflowStatus) bool {
@@ -420,6 +423,99 @@ func validatePathString(w http.ResponseWriter, field string, value string) bool 
 		return false
 	}
 	return true
+}
+
+func validateArchiveLocation(w http.ResponseWriter, field string, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if len(value) > maxPathBytes || hasControlCharacter(value) {
+		http.Error(w, "invalid "+field, http.StatusBadRequest)
+		return false
+	}
+	if strings.HasPrefix(value, "//") || strings.HasPrefix(value, `\\`) {
+		http.Error(w, "invalid "+field, http.StatusBadRequest)
+		return false
+	}
+
+	if strings.Contains(value, "://") {
+		u, err := url.Parse(value)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			http.Error(w, "invalid "+field, http.StatusBadRequest)
+			return false
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https", "s3", "oss", "cos":
+		default:
+			http.Error(w, "invalid "+field, http.StatusBadRequest)
+			return false
+		}
+		if strings.Contains(u.Path, `\`) || hasUnsafePathSegments(u.EscapedPath(), true) {
+			http.Error(w, "invalid "+field, http.StatusBadRequest)
+			return false
+		}
+		return true
+	}
+
+	// Without "://", reject URI-like values such as "javascript:alert(1)".
+	// Windows drive paths (for local development agents) remain accepted.
+	if schemeLikePattern.MatchString(value) && !windowsDrivePathPattern.MatchString(value) {
+		http.Error(w, "invalid "+field, http.StatusBadRequest)
+		return false
+	}
+	if hasUnsafePathSegments(value, true) {
+		http.Error(w, "invalid "+field, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func validateObjectKeyField(w http.ResponseWriter, field string, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	if len(value) > maxPathBytes || hasControlCharacter(value) ||
+		strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`) ||
+		strings.Contains(value, `\`) || strings.Contains(value, "://") ||
+		strings.ContainsAny(value, "?#") || hasUnsafePathSegments(value, false) {
+		http.Error(w, "invalid "+field, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func hasControlCharacter(value string) bool {
+	return strings.ContainsFunc(value, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	})
+}
+
+func hasUnsafePathSegments(value string, allowEmpty bool) bool {
+	decoded := strings.ReplaceAll(value, `\`, "/")
+	for i := 0; i < 4; i++ {
+		next, err := url.PathUnescape(decoded)
+		if err != nil {
+			return true
+		}
+		if next == decoded {
+			break
+		}
+		decoded = next
+	}
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "" {
+			if allowEmpty {
+				continue
+			}
+			return true
+		}
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {

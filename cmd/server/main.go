@@ -138,7 +138,17 @@ func main() {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			mkm.ReloadAll()
+			var err error
+			if *allowStaticAgentKey {
+				err = mkm.ReloadAll()
+			} else {
+				err = mkm.GetQueryKeyManager().Reload()
+			}
+			if err != nil {
+				log.Printf("Failed to reload key files: %v", err)
+				http.Error(w, "failed to reload key files", http.StatusInternalServerError)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, "Reloaded keys.\nAgent keys: %d\nQuery keys: %d\n",
 				mkm.AgentKeyCount(), mkm.QueryKeyCount())
@@ -171,7 +181,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              listenAddr,
-		Handler:           router,
+		Handler:           securityHeaders(router),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -182,6 +192,14 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func parseBoolEnv(name string, fallback bool) bool {

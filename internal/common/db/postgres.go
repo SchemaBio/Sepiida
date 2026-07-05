@@ -144,7 +144,25 @@ func (p *PostgreSQL) Close() error {
 // CreateWorkflow creates a new workflow record
 func (p *PostgreSQL) CreateWorkflow(ctx context.Context, workflow *model.Workflow) error {
 	query := `INSERT INTO workflows (id, uuid, name, status, start_time, end_time, output_dir, outputs_json, agent_id, archived, archived_at, archive_base, base_path, outputs_resolved_key, object_prefix, key_prefix, archived_count, created_at, updated_at)
-			  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`
+			  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			  ON CONFLICT (id) DO UPDATE SET
+				uuid=EXCLUDED.uuid,
+				name=EXCLUDED.name,
+				status=EXCLUDED.status,
+				start_time=EXCLUDED.start_time,
+				end_time=EXCLUDED.end_time,
+				output_dir=EXCLUDED.output_dir,
+				outputs_json=COALESCE(EXCLUDED.outputs_json, workflows.outputs_json),
+				agent_id=EXCLUDED.agent_id,
+				archived=(workflows.archived OR EXCLUDED.archived),
+				archived_at=COALESCE(workflows.archived_at, EXCLUDED.archived_at),
+				archive_base=CASE WHEN workflows.archived THEN workflows.archive_base ELSE EXCLUDED.archive_base END,
+				base_path=CASE WHEN workflows.archived THEN workflows.base_path ELSE EXCLUDED.base_path END,
+				outputs_resolved_key=CASE WHEN workflows.archived THEN workflows.outputs_resolved_key ELSE EXCLUDED.outputs_resolved_key END,
+				object_prefix=CASE WHEN workflows.archived THEN workflows.object_prefix ELSE EXCLUDED.object_prefix END,
+				key_prefix=CASE WHEN workflows.archived THEN workflows.key_prefix ELSE EXCLUDED.key_prefix END,
+				archived_count=CASE WHEN workflows.archived THEN workflows.archived_count ELSE EXCLUDED.archived_count END,
+				updated_at=EXCLUDED.updated_at`
 	now := time.Now()
 	workflow.CreatedAt = now
 	workflow.UpdatedAt = now
@@ -311,7 +329,20 @@ func (p *PostgreSQL) ListWorkflows(ctx context.Context, limit, offset int) ([]*m
 // CreateTask creates a new task record
 func (p *PostgreSQL) CreateTask(ctx context.Context, task *model.Task) error {
 	query := `INSERT INTO tasks (id, workflow_id, uuid, name, job_name, status, start_time, end_time, exit_code, output_dir, stdout, stderr, created_at, updated_at)
-			  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+			  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			  ON CONFLICT (id) DO UPDATE SET
+				workflow_id=EXCLUDED.workflow_id,
+				uuid=EXCLUDED.uuid,
+				name=EXCLUDED.name,
+				job_name=EXCLUDED.job_name,
+				status=EXCLUDED.status,
+				start_time=EXCLUDED.start_time,
+				end_time=EXCLUDED.end_time,
+				exit_code=EXCLUDED.exit_code,
+				output_dir=EXCLUDED.output_dir,
+				stdout=EXCLUDED.stdout,
+				stderr=EXCLUDED.stderr,
+				updated_at=EXCLUDED.updated_at`
 	now := time.Now()
 	task.CreatedAt = now
 	task.UpdatedAt = now

@@ -2,6 +2,8 @@ package apikey
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -64,7 +66,9 @@ func (km *KeyManager) Start(interval time.Duration) {
 		return
 	}
 	// Load keys immediately
-	km.loadKeys()
+	if err := km.loadKeys(); err != nil {
+		log.Printf("Warning: failed to load key file %s: %v", km.keyFile, err)
+	}
 	if interval <= 0 {
 		log.Printf("Warning: non-positive key refresh interval %v; key auto-refresh disabled", interval)
 		return
@@ -76,22 +80,23 @@ func (km *KeyManager) Start(interval time.Duration) {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			km.loadKeys()
+			if err := km.loadKeys(); err != nil {
+				log.Printf("Warning: failed to refresh key file %s: %v", km.keyFile, err)
+			}
 		}
 	}()
 }
 
 // loadKeys loads keys from the key file
 // It checks file modification time to avoid unnecessary reloads
-func (km *KeyManager) loadKeys() {
+func (km *KeyManager) loadKeys() error {
 	if strings.TrimSpace(km.keyFile) == "" {
-		return
+		return nil
 	}
 	info, err := os.Stat(km.keyFile)
 	if err != nil {
 		// File doesn't exist or inaccessible, keep existing keys
-		log.Printf("Warning: failed to stat key file %s: %v", km.keyFile, err)
-		return
+		return fmt.Errorf("stat key file: %w", err)
 	}
 
 	// Check if file was modified since last load
@@ -101,14 +106,13 @@ func (km *KeyManager) loadKeys() {
 
 	if !info.ModTime().After(lastMod) {
 		// File not modified, skip reload
-		return
+		return nil
 	}
 
 	// Read file
 	file, err := os.Open(km.keyFile)
 	if err != nil {
-		log.Printf("Warning: failed to open key file %s: %v", km.keyFile, err)
-		return
+		return fmt.Errorf("open key file: %w", err)
 	}
 	defer file.Close()
 
@@ -129,14 +133,14 @@ func (km *KeyManager) loadKeys() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Warning: failed to read key file %s: %v", km.keyFile, err)
-		return
+		return fmt.Errorf("read key file: %w", err)
 	}
 
 	km.mu.Lock()
 	km.keys = newKeys
 	km.lastModTime = info.ModTime()
 	km.mu.Unlock()
+	return nil
 }
 
 // Validate checks if a key is valid
@@ -196,6 +200,12 @@ func parseKeyLine(line string) (string, KeyScope) {
 			for _, uuid := range splitScopeValues(value) {
 				scope.UUIDs[uuid] = struct{}{}
 			}
+		default:
+			// Treat unknown key=value directives as scoped-but-empty instead of
+			// silently granting an unrestricted query key. This fails closed for
+			// typos such as "workfow=..." while preserving old unrestricted lines
+			// that contain only the key (or inline comments without "=").
+			scope.Unrestricted = false
 		}
 	}
 
@@ -226,8 +236,7 @@ func (km *KeyManager) Reload() error {
 	km.mu.Lock()
 	km.lastModTime = time.Time{} // Reset to force reload
 	km.mu.Unlock()
-	km.loadKeys()
-	return nil
+	return km.loadKeys()
 }
 
 // MultiKeyManager manages multiple key files (e.g., agent keys and query keys)
@@ -280,8 +289,7 @@ func (mkm *MultiKeyManager) QueryKeyCount() int {
 	return mkm.queryKeyMgr.Count()
 }
 
-// ReloadAll forces reload of all key files
-func (mkm *MultiKeyManager) ReloadAll() {
-	mkm.agentKeyMgr.Reload()
-	mkm.queryKeyMgr.Reload()
+// ReloadAll forces reload of all key files.
+func (mkm *MultiKeyManager) ReloadAll() error {
+	return errors.Join(mkm.agentKeyMgr.Reload(), mkm.queryKeyMgr.Reload())
 }
