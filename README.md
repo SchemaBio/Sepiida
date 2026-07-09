@@ -34,6 +34,7 @@ MiniWDL使用 `-d uuid` 模式执行时，目录结构如下：
   - Agent Key：用于Agent推送数据
   - Query Key：用于查询结果
 - Key文件动态刷新
+- **生产认证**：Agent 推送默认使用 Squid 签发的每任务令牌（`-task-token-secret`）；静态 Agent Key 仅 `-allow-static-agent-key=true` 时可用（开发/兼容）
 
 ### Agent端
 - 监控UUID目录下的 `_LAST` 软链接获取最新执行
@@ -110,33 +111,39 @@ key-003
 ### 4. 启动Server
 
 ```bash
-./bin/sepiida-server -p 8080 \
-    -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
-    -agent-key agent-keys.txt \
-    -query-key query-keys.txt
-
-# 自定义刷新间隔（默认30秒）
-./bin/sepiida-server -p 8080 \
+./bin/sepiida-server -p 9090 \
     -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
     -agent-key agent-keys.txt \
     -query-key query-keys.txt \
+    -allow-static-agent-key=true
+
+# 自定义刷新间隔（默认30秒）
+./bin/sepiida-server -p 9090 \
+    -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
+    -agent-key agent-keys.txt \
+    -query-key query-keys.txt \
+    -allow-static-agent-key=true \
     -key-refresh 60
 ```
+
+> 上例使用静态 Agent Key，仅适用于本地/兼容场景，因此必须显式 `-allow-static-agent-key=true`。生产环境应改用 `-task-token-secret <≥32字符密钥>`（需与 Squid `SEPIIDA_TASK_TOKEN_SECRET` 一致），由 Squid 为每个任务签发写入令牌；未配置 `-task-token-secret` 且未启用 `-allow-static-agent-key` 时 Server 会启动失败。
 
 **参数说明：**
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-p` | 监听端口 | 8080 |
+| `-p` | 监听端口 | 9090 |
 | `-d` | 数据库连接字符串 | postgres://localhost:5432/sepiida?user=postgres&password=postgres |
-| `-agent-key` | Agent Key文件路径 | **必填** |
+| `-agent-key` | Agent Key文件路径 | 必填（仅 `-allow-static-agent-key=true` 时需要） |
 | `-query-key` | Query Key文件路径 | **必填** |
+| `-task-token-secret` | 每任务写入令牌的 HMAC 共享密钥（生产必填，需与 Squid 一致） | 空 |
+| `-allow-static-agent-key` | 允许静态 Agent Key 推送（仅开发/兼容） | false |
 | `-key-refresh` | Key文件刷新间隔（秒） | 30 |
 
 ### 5. 启动Agent
 
 ```bash
 # Agent使用agent-keys.txt中的某个key
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 \
     -id agent-001 \
     -w /mnt/data/output
@@ -145,7 +152,7 @@ key-003
 **参数说明：**
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `-s` | Server URL | http://localhost:8080 |
+| `-s` | Server URL | http://localhost:9090 |
 | `-key` | API Key（需在agent-keys.txt中） | （需指定） |
 | `-id` | Agent ID | agent-001 |
 | `-i` | 推送间隔（秒） | 60 |
@@ -162,35 +169,35 @@ Agent 可以在 Workflow 成功完成后，自动将输出文件归档到对象�
 
 ```bash
 # 归档到 AWS S3（通过参数指定凭据）
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive s3://my-bucket/prefix \
     -archive-key-id AKIA... \
     -archive-key-secret ...
 
 # 归档到 MinIO（通过参数指定凭据）
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive http://minio.local:9000/my-bucket/prefix \
     -archive-key-id minioadmin \
     -archive-key-secret minioadmin
 
 # 归档到阿里云 OSS
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive oss://cn-hangzhou/my-bucket/prefix \
     -archive-key-id LTAI... \
     -archive-key-secret ...
 
 # 归档到腾讯云 COS（虚拟托管域名）
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive https://mybucket-1250000000.cos.ap-guangzhou.myqcloud.com/prefix \
     -archive-key-id AKID... \
     -archive-key-secret ...
 
 # 归档到腾讯云 COS（短URL格式，等价于上面）
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive cos://ap-guangzhou/mybucket-1250000000/prefix \
     -archive-key-id AKID... \
@@ -199,12 +206,12 @@ Agent 可以在 Workflow 成功完成后，自动将输出文件归档到对象�
 # 也可以通过环境变量指定凭据（不使用 -archive-key-* 参数时自动读取）
 export AWS_ACCESS_KEY_ID=AKIA...
 export AWS_SECRET_ACCESS_KEY=...
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive s3://my-bucket/prefix
 
 # 归档到本地目录（无需凭据）
-./bin/sepiida-agent -s http://localhost:8080 \
+./bin/sepiida-agent -s http://localhost:9090 \
     -key my-agent-key-001 -id agent-001 -w /mnt/data/output \
     -archive /mnt/archive/outputs
 ```
@@ -257,15 +264,15 @@ export AWS_SECRET_ACCESS_KEY=...
 ```bash
 # 查询指定UUID的Workflow
 curl -H "Authorization: Bearer my-query-key-001" \
-    "http://localhost:8080/api/v1/workflow?uuid=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    "http://localhost:9090/api/v1/workflow?uuid=a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
 # 列出所有Workflows
 curl -H "Authorization: Bearer my-query-key-001" \
-    "http://localhost:8080/api/v1/workflows"
+    "http://localhost:9090/api/v1/workflows"
 
 # 查询Workflow的Tasks
 curl -H "Authorization: Bearer my-query-key-001" \
-    "http://localhost:8080/api/v1/workflow/tasks?id=20260428_094955_SingleWES"
+    "http://localhost:9090/api/v1/workflow/tasks?id=20260428_094955_SingleWES"
 ```
 
 ## API接口
@@ -328,7 +335,7 @@ my-workflow-query-key workflow=workflow-id-1
 ```bash
 # 强制重新加载Key文件（需要Query Key）
 curl -X POST -H "Authorization: Bearer my-query-key-001" \
-    "http://localhost:8080/api/v1/keys/reload"
+    "http://localhost:9090/api/v1/keys/reload"
 ```
 
 ## 数据库设计
