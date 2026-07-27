@@ -305,8 +305,15 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 			archived++
 			continue
 		}
+		// Keep the original tabular result as well. Octopus imports these files
+		// into its relational result tables, while Parquet remains available for
+		// analytical consumers.
+		if err := a.archiveFileByKey(ctx, originalKey, realPath); err != nil {
+			archiveErrs = append(archiveErrs, fmt.Errorf("archive original text output %s: %w", textFile, err))
+			continue
+		}
 		pathMap[textFile] = parquetKey
-		archived++
+		archived += 2
 		log.Printf("Converted %s to parquet -> key=%s", filepath.Base(textFile), parquetKey)
 	}
 
