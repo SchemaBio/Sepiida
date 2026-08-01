@@ -21,3 +21,25 @@ func TestParsePostgresConnSupportsLegacyFormat(t *testing.T) {
 		t.Fatalf("unexpected legacy config: %+v", cfg)
 	}
 }
+
+func TestNormalizeAuthMode(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{input: "", want: "task-token"},
+		{input: " STATIC ", want: "static"},
+		{input: "task-token", want: "task-token"},
+		{input: "legacy", wantErr: true},
+	}
+	for _, test := range tests {
+		got, err := normalizeAuthMode(test.input)
+		if (err != nil) != test.wantErr {
+			t.Fatalf("normalizeAuthMode(%q) error = %v, wantErr %t", test.input, err, test.wantErr)
+		}
+		if got != test.want {
+			t.Fatalf("normalizeAuthMode(%q) = %q, want %q", test.input, got, test.want)
+		}
+	}
+}

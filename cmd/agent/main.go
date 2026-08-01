@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/url"
 	"os"
@@ -14,12 +15,11 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/agent/collector"
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
 	"github.com/SchemaBio/Sepiida/internal/agent/sender"
-	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
 
 func main() {
 	// Command line flags
-	serverURL := flag.String("s", firstNonEmptyEnv("SEPIIDA_SERVER_URL", "SEPIIDA_API_URL", "SEPIIDA_SERVER"), "server URL; env: SEPIIDA_SERVER_URL")
+	serverURL := flag.String("s", defaultServerURL(), "server URL; env: SEPIIDA_SERVER_URL")
 	apiKey := flag.String("key", os.Getenv("SEPIIDA_AGENT_KEY"), "API key for authentication; env: SEPIIDA_AGENT_KEY")
 	agentID := flag.String("id", firstNonEmptyEnv("SEPIIDA_AGENT_ID", "HOSTNAME"), "agent identifier; env: SEPIIDA_AGENT_ID")
 	interval := flag.Int("i", parsePositiveIntEnv("SEPIIDA_AGENT_INTERVAL", 60), "poll interval in seconds; env: SEPIIDA_AGENT_INTERVAL")
@@ -28,8 +28,7 @@ func main() {
 	archiveKeyID := flag.String("archive-key-id", os.Getenv("SEPIIDA_ARCHIVE_KEY_ID"), "access key ID for object storage (overrides provider env vars); env: SEPIIDA_ARCHIVE_KEY_ID")
 	archiveKeySecret := flag.String("archive-key-secret", os.Getenv("SEPIIDA_ARCHIVE_KEY_SECRET"), "secret access key for object storage (overrides provider env vars); env: SEPIIDA_ARCHIVE_KEY_SECRET")
 	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
-	taskToken := flag.String("task-token", firstNonEmptyEnv("SEPIIDA_TASK_TOKEN", "SEPIIDA_AGENT_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
-	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "legacy shared secret for locally signing per-task write tokens")
+	taskToken := flag.String("task-token", os.Getenv("SEPIIDA_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
 	flag.Parse()
 
 	// Parse watch directories
@@ -46,11 +45,8 @@ func main() {
 	if *agentID == "" {
 		*agentID = "agent-001"
 	}
-	if *apiKey == "" && *taskToken == "" && *taskTokenSecret == "" {
-		log.Fatal("Error: no API key, task token, or legacy task token secret specified. Please specify -key, -task-token, or -task-token-secret for authentication.")
-	}
-	if *taskTokenSecret != "" && len(*taskTokenSecret) < tasktoken.MinSecretBytes {
-		log.Fatalf("Error: -task-token-secret must be at least %d characters. Use a long random shared secret.", tasktoken.MinSecretBytes)
+	if err := validateAgentCredentials(*apiKey, *taskToken); err != nil {
+		log.Fatal(err)
 	}
 	if *interval <= 0 {
 		log.Fatal("Error: -i poll interval must be greater than 0 seconds.")
@@ -65,8 +61,6 @@ func main() {
 	log.Printf("Watch Dirs: %v", dirs)
 	if *taskToken != "" {
 		log.Printf("Authentication: pre-issued task token")
-	} else if *taskTokenSecret != "" {
-		log.Printf("Authentication: legacy local task-token signing (prefer -task-token for production)")
 	} else {
 		log.Printf("Authentication: static agent key")
 	}
@@ -74,7 +68,7 @@ func main() {
 	// Create components
 	logParser := parser.NewLogParser()
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
-	httpSender := sender.NewHTTPSenderWithTaskCredential(*serverURL, *apiKey, *agentID, *taskToken, *taskTokenSecret)
+	httpSender := sender.NewHTTPSenderWithTaskCredential(*serverURL, *apiKey, *agentID, *taskToken, "")
 
 	// Create archiver if archive path is specified
 	var arch *archiver.Archiver
@@ -101,6 +95,17 @@ func main() {
 	for range ticker.C {
 		runCollection(progressCollector, httpSender, arch, *archiveTimeout)
 	}
+}
+
+func defaultServerURL() string {
+	return os.Getenv("SEPIIDA_SERVER_URL")
+}
+
+func validateAgentCredentials(apiKey, taskToken string) error {
+	if (apiKey == "") == (taskToken == "") {
+		return fmt.Errorf("configure exactly one of -key or -task-token for authentication")
+	}
+	return nil
 }
 
 func firstNonEmptyEnv(names ...string) string {

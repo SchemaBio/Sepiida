@@ -6,10 +6,8 @@ version: "3.8"
 # Before starting:
 #   1. Copy query-keys.example -> query-keys.txt and set real query keys
 #   2. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
-#   3. For production/CVM, set a Squid-issued SEPIIDA_TASK_TOKEN for the Agent
-#      and the matching SEPIIDA_TASK_TOKEN_SECRET for the Server. For legacy
-#      local deployments only, set SEPIIDA_ALLOW_STATIC_AGENT_KEY=true and
-#      provide SEPIIDA_AGENT_KEY + agent-keys.txt.
+#   3. This standalone compose uses static auth. Set SEPIIDA_AGENT_KEY to a
+#      value present in agent-keys.txt.
 #   4. Create ./output dir or change SEPIIDA_WATCH_DIRS below
 #
 # Usage:
@@ -32,13 +30,12 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SEPIIDA_KEY_REFRESH_SECONDS: ${SEPIIDA_KEY_REFRESH_SECONDS:-30}
-      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_TASK_TOKEN_SECRET}
-      SEPIIDA_ALLOW_STATIC_AGENT_KEY: ${SEPIIDA_ALLOW_STATIC_AGENT_KEY:-false}
+      SEPIIDA_AUTH_MODE: static
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
-      - ${SEPIIDA_AGENT_KEYS_FILE:-./agent-keys.txt}:/etc/sepiida/keys/agent-keys.txt:ro
-      - ${SEPIIDA_QUERY_KEYS_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
+      - ${SEPIIDA_AGENT_KEY_FILE:-./agent-keys.txt}:/etc/sepiida/keys/agent-keys.txt:ro
+      - ${SEPIIDA_QUERY_KEY_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
     networks:
       - sepiida
 
@@ -62,9 +59,6 @@ services:
       SEPIIDA_ARCHIVE_KEY_SECRET: ${SEPIIDA_ARCHIVE_KEY_SECRET:-}
       SEPIIDA_ARCHIVE_TIMEOUT: ${SEPIIDA_ARCHIVE_TIMEOUT:-30m}
       SEPIIDA_TASK_TOKEN: ${SEPIIDA_TASK_TOKEN:-}
-      # Do not pass the server signing secret to the agent by default. Set this
-      # only for trusted legacy/local deployments that intentionally sign locally.
-      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_AGENT_TASK_TOKEN_SECRET:-}
     volumes:
       # Mount the directories the agent should watch for MiniWDL workflow outputs.
       # Each watched directory should contain UUID-named subdirectories with

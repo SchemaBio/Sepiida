@@ -98,8 +98,8 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 	} else {
 		// Read from environment variables
 		transport = &cos.AuthorizationTransport{
-			SecretID:  firstNonEmptyEnv("TENCENT_CLOUD_SECRET_ID", "COS_SECRET_ID"),
-			SecretKey: firstNonEmptyEnv("TENCENT_CLOUD_SECRET_KEY", "COS_SECRET_KEY"),
+			SecretID:  os.Getenv("COS_SECRET_ID"),
+			SecretKey: os.Getenv("COS_SECRET_KEY"),
 		}
 	}
 
@@ -178,13 +178,4 @@ func (b *COSBackend) BasePath() string {
 
 func (b *COSBackend) Close() error {
 	return nil
-}
-
-func firstNonEmptyEnv(names ...string) string {
-	for _, name := range names {
-		if value := os.Getenv(name); value != "" {
-			return value
-		}
-	}
-	return ""
 }

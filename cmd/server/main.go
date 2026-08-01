@@ -27,27 +27,35 @@ func main() {
 	// Key files default from env so containers can supply them via env vars
 	// instead of being forced to override the entrypoint with explicit flags.
 	// Precedence: CLI flag > env var > "" (which we still validate as required).
-	agentKeyFile := flag.String("agent-key", firstNonEmptyEnv("SEPIIDA_AGENT_KEY_FILE", "SEPIIDA_AGENT_KEYS_FILE"), "path to agent key file (keys for pushing data); env: SEPIIDA_AGENT_KEY_FILE")
-	queryKeyFile := flag.String("query-key", firstNonEmptyEnv("SEPIIDA_QUERY_KEY_FILE", "SEPIIDA_QUERY_KEYS_FILE"), "path to query key file (keys for querying results); env: SEPIIDA_QUERY_KEY_FILE")
+	agentKeyFile := flag.String("agent-key", os.Getenv("SEPIIDA_AGENT_KEY_FILE"), "path to agent key file (keys for pushing data); env: SEPIIDA_AGENT_KEY_FILE")
+	queryKeyFile := flag.String("query-key", os.Getenv("SEPIIDA_QUERY_KEY_FILE"), "path to query key file (keys for querying results); env: SEPIIDA_QUERY_KEY_FILE")
 	keyRefresh := flag.Int("key-refresh", parsePositiveIntEnv("SEPIIDA_KEY_REFRESH_SECONDS", 30), "key file refresh interval in seconds; env: SEPIIDA_KEY_REFRESH_SECONDS")
 	taskTokenSecret := flag.String("task-token-secret", os.Getenv("SEPIIDA_TASK_TOKEN_SECRET"), "shared secret for per-task agent tokens")
-	allowStaticAgentKey := flag.Bool("allow-static-agent-key", parseBoolEnv("SEPIIDA_ALLOW_STATIC_AGENT_KEY", false), "allow static agent keys for write APIs (development/compatibility only)")
+	authMode := flag.String("auth-mode", os.Getenv("SEPIIDA_AUTH_MODE"), "write authentication mode: static or task-token; env: SEPIIDA_AUTH_MODE")
 	flag.Parse()
+	normalizedAuthMode, err := normalizeAuthMode(*authMode)
+	if err != nil {
+		log.Fatal(err)
+	}
+	*authMode = normalizedAuthMode
 
 	// Validate key files. Static agent keys are only needed when explicitly
 	// enabling legacy/development writes; production CVM agents should use
 	// per-task tokens signed by Squid instead.
-	if *agentKeyFile == "" && *allowStaticAgentKey {
-		log.Fatal("Error: -agent-key (or SEPIIDA_AGENT_KEY_FILE env) is required when -allow-static-agent-key=true.")
+	if *agentKeyFile == "" && *authMode == "static" {
+		log.Fatal("Error: -agent-key (or SEPIIDA_AGENT_KEY_FILE env) is required when auth mode is static.")
 	}
 	if *queryKeyFile == "" {
 		log.Fatal("Error: -query-key (or SEPIIDA_QUERY_KEY_FILE env) is required. Please specify a query key file path.")
 	}
-	if *taskTokenSecret == "" && !*allowStaticAgentKey {
-		log.Fatal("Error: -task-token-secret is required unless -allow-static-agent-key=true is set for development/compatibility.")
+	if *taskTokenSecret == "" && *authMode == "task-token" {
+		log.Fatal("Error: -task-token-secret is required when auth mode is task-token.")
+	}
+	if *taskTokenSecret != "" && *authMode == "static" {
+		log.Fatal("Error: -task-token-secret must be empty when auth mode is static.")
 	}
 	if *taskTokenSecret != "" && len(*taskTokenSecret) < tasktoken.MinSecretBytes {
-		log.Fatalf("Error: -task-token-secret must be at least %d characters. Leave it empty only when -allow-static-agent-key=true is set for development/compatibility.", tasktoken.MinSecretBytes)
+		log.Fatalf("Error: -task-token-secret must be at least %d characters.", tasktoken.MinSecretBytes)
 	}
 	if *keyRefresh <= 0 {
 		log.Fatal("Error: -key-refresh must be greater than 0 seconds.")
@@ -64,7 +72,7 @@ func main() {
 	queryKeyCount := mkm.QueryKeyCount()
 
 	if agentKeyCount == 0 {
-		if *allowStaticAgentKey {
+		if *authMode == "static" {
 			log.Printf("Warning: No agent keys loaded from %s", *agentKeyFile)
 		} else {
 			log.Printf("Static agent key writes are disabled; no agent keys are required")
@@ -99,7 +107,7 @@ func main() {
 	progressHandler := handler.NewProgressHandler(workflowService)
 
 	// Create authentication middleware
-	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret, *allowStaticAgentKey)
+	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret, *authMode == "static")
 	queryAuth := middleware.NewQueryAuthMiddleware(mkm.GetQueryKeyManager())
 
 	// Setup routes
@@ -139,7 +147,7 @@ func main() {
 				return
 			}
 			var err error
-			if *allowStaticAgentKey {
+			if *authMode == "static" {
 				err = mkm.ReloadAll()
 			} else {
 				err = mkm.GetQueryKeyManager().Reload()
@@ -177,7 +185,7 @@ func main() {
 	log.Printf("Database: %s", redactDatabaseURL(*database))
 	log.Printf("Agent Key File: %s (%d keys)", *agentKeyFile, agentKeyCount)
 	log.Printf("Query Key File: %s (%d keys)", *queryKeyFile, queryKeyCount)
-	log.Printf("Static Agent Key Writes: %t", *allowStaticAgentKey)
+	log.Printf("Write Authentication Mode: %s", *authMode)
 
 	server := &http.Server{
 		Addr:              listenAddr,
@@ -194,25 +202,23 @@ func main() {
 	}
 }
 
+func normalizeAuthMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if mode == "" {
+		return "task-token", nil
+	}
+	if mode != "static" && mode != "task-token" {
+		return "", fmt.Errorf("SEPIIDA_AUTH_MODE must be static or task-token")
+	}
+	return mode, nil
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
-}
-
-func parseBoolEnv(name string, fallback bool) bool {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		log.Printf("Warning: invalid %s=%q, using %t", name, raw, fallback)
-		return fallback
-	}
-	return value
 }
 
 func parsePositiveIntEnv(name string, fallback int) int {

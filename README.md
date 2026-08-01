@@ -34,7 +34,7 @@ MiniWDL使用 `-d uuid` 模式执行时，目录结构如下：
   - Agent Key：用于Agent推送数据
   - Query Key：用于查询结果
 - Key文件动态刷新
-- **生产认证**：Agent 推送默认使用 Squid 签发的每任务令牌（`-task-token-secret`）；静态 Agent Key 仅 `-allow-static-agent-key=true` 时可用（开发/兼容）
+- **明确认证模式**：`task-token` 用于 SaaS，`static` 用于自部署和本地开发
 
 ### Agent端
 - 监控UUID目录下的 `_LAST` 软链接获取最新执行
@@ -115,28 +115,29 @@ key-003
     -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
     -agent-key agent-keys.txt \
     -query-key query-keys.txt \
-    -allow-static-agent-key=true
+    -auth-mode static
 
 # 自定义刷新间隔（默认30秒）
 ./bin/sepiida-server -p 9090 \
     -d "postgres://localhost:5432/sepiida?user=postgres&password=xxx" \
     -agent-key agent-keys.txt \
     -query-key query-keys.txt \
-    -allow-static-agent-key=true \
+    -auth-mode static \
     -key-refresh 60
 ```
 
-> 上例使用静态 Agent Key，仅适用于本地/兼容场景，因此必须显式 `-allow-static-agent-key=true`。生产环境应改用 `-task-token-secret <≥32字符密钥>`（需与 Squid `SEPIIDA_TASK_TOKEN_SECRET` 一致），由 Squid 为每个任务签发写入令牌；未配置 `-task-token-secret` 且未启用 `-allow-static-agent-key` 时 Server 会启动失败。
+> 自部署路线使用 `static`；SaaS 路线使用 `task-token` 并配置至少 32 字符的
+> `SEPIIDA_TASK_TOKEN_SECRET`，由 Squid 为每个任务签发写入令牌。
 
 **参数说明：**
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-p` | 监听端口 | 9090 |
 | `-d` | 数据库连接字符串 | postgres://localhost:5432/sepiida?user=postgres&password=postgres |
-| `-agent-key` | Agent Key文件路径 | 必填（仅 `-allow-static-agent-key=true` 时需要） |
+| `-agent-key` | Agent Key文件路径 | `static` 模式必填 |
 | `-query-key` | Query Key文件路径 | **必填** |
-| `-task-token-secret` | 每任务写入令牌的 HMAC 共享密钥（生产必填，需与 Squid 一致） | 空 |
-| `-allow-static-agent-key` | 允许静态 Agent Key 推送（仅开发/兼容） | false |
+| `-task-token-secret` | 每任务写入令牌的 HMAC 共享密钥（SaaS 与 Squid 一致） | 空 |
+| `-auth-mode` | `static` 或 `task-token` | task-token |
 | `-key-refresh` | Key文件刷新间隔（秒） | 30 |
 
 ### 5. 启动Agent
@@ -237,7 +238,7 @@ export AWS_SECRET_ACCESS_KEY=...
 | AWS S3 / MinIO | `-archive-key-id` + `-archive-key-secret` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
 | MinIO | 同上 | `MINIO_ROOT_USER` + `MINIO_ROOT_PASSWORD` |
 | 阿里云 OSS | 同上 | `ALIBABA_CLOUD_ACCESS_KEY_ID` + `ALIBABA_CLOUD_ACCESS_KEY_SECRET` |
-| 腾讯云 COS | 同上 | `TENCENT_CLOUD_SECRET_ID` + `TENCENT_CLOUD_SECRET_KEY` |
+| 腾讯云 COS | 同上 | `COS_SECRET_ID` + `COS_SECRET_KEY` |
 
 **归档内容：**
 

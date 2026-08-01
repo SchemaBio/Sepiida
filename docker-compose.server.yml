@@ -28,12 +28,12 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SEPIIDA_KEY_REFRESH_SECONDS: ${SEPIIDA_KEY_REFRESH_SECONDS:-30}
-      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_TASK_TOKEN_SECRET}
-      SEPIIDA_ALLOW_STATIC_AGENT_KEY: ${SEPIIDA_ALLOW_STATIC_AGENT_KEY:-false}
+      SEPIIDA_AUTH_MODE: ${SEPIIDA_AUTH_MODE:-task-token}
+      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_TASK_TOKEN_SECRET:-}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
-      - ${SEPIIDA_QUERY_KEYS_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
+      - ${SEPIIDA_QUERY_KEY_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
 
 networks:
   default:
