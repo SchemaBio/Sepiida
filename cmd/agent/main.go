@@ -39,11 +39,11 @@ func main() {
 	}
 
 	// Validate authentication configuration
-	if *serverURL == "" {
-		*serverURL = "http://localhost:9090"
-	}
 	if *agentID == "" {
 		*agentID = "agent-001"
+	}
+	if *serverURL == "" {
+		*serverURL = "http://localhost:9090"
 	}
 	if err := validateAgentCredentials(*apiKey, *taskToken); err != nil {
 		log.Fatal(err)
@@ -231,7 +231,7 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 				log.Printf("Failed to save push state for UUID %s: %v", uuid, err)
 			}
 
-			// Mark outputs as pushed if workflow is done and outputs were sent
+			// Mark outputs as pushed if workflow is done and outputs were sent.
 			if result.Progress.Workflow.Status == "success" && result.Progress.Workflow.OutputsJSON != "" {
 				if err := sender.SendOutput(uuid, workflowID, result.Progress.Workflow.OutputsJSON); err != nil {
 					log.Printf("Failed to send output for UUID %s: %v", uuid, err)
@@ -246,7 +246,7 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 
 		// Archive if configured — independent of server push
 		if arch != nil && result.Progress.Workflow.Status == "success" {
-			state, _ := collector.LoadState(result.UUIDDir)
+			state := result.State
 			if state != nil && !state.Archived {
 				ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
 				archiveResult, err := arch.ArchiveWorkflow(ctx, uuid, workflowID, result.ExecutionDir)
@@ -255,11 +255,15 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 					log.Printf("Failed to archive for UUID %s: %v", uuid, err)
 				} else {
 					log.Printf("Successfully archived %d items for UUID %s", archiveResult.ArchivedCount, uuid)
-					// Notify server that archiving is complete
-					if err := sender.NotifyArchived(archiveResult); err != nil {
-						log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
+					// Persist before marking so a failed progress report cannot trigger
+					// another archive of the same completed execution.
+					if err := collector.SaveState(result.UUIDDir, result.State); err != nil {
+						log.Printf("Failed to save archive state for UUID %s: %v", uuid, err)
 					} else if err := collector.MarkArchived(result.UUIDDir); err != nil {
 						log.Printf("Failed to mark archived: %v", err)
+					}
+					if err := sender.NotifyArchived(archiveResult); err != nil {
+						log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
 					}
 				}
 			}
