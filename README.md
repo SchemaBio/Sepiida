@@ -66,13 +66,10 @@ DATABASE_URL=postgres://user:password@host:5432/sepiida?sslmode=disable
 SERVER_PORT=9090
 ```
 
-**仅启动 Server：**
-```bash
-docker compose -f docker-compose.server.yml build
-docker compose -f docker-compose.server.yml up -d
-```
+Sepiida 的 Docker 镜像只包含 Server。Agent 需要直接运行在能够访问
+MiniWDL 输出目录的宿主机或计算节点上，不作为应用镜像发布。
 
-**同时启动 Server + Agent：**
+**启动 Server：**
 ```bash
 docker compose build
 docker compose up -d

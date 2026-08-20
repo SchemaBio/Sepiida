@@ -1,14 +1,11 @@
-version: "3.8"
-
 # =============================================================================
-# Sepiida — Server + Agent on the same host
+# Sepiida Server only
 #
 # Before starting:
 #   1. Copy query-keys.example -> query-keys.txt and set real query keys
 #   2. Copy .env.example -> .env and set DATABASE_URL to your Postgres instance
-#   3. This standalone compose uses static auth. Set SEPIIDA_AGENT_KEY to a
-#      value present in agent-keys.txt.
-#   4. Create ./output dir or change SEPIIDA_WATCH_DIRS below
+#   3. This standalone compose defaults to static authentication. For SaaS,
+#      switch to task-token authentication and set SEPIIDA_TASK_TOKEN_SECRET.
 #
 # Usage:
 #   docker compose build
@@ -16,63 +13,19 @@ version: "3.8"
 # =============================================================================
 
 services:
-  # ── Sepiida Server ────────────────────────────────────────────────────────
   server:
     build:
       context: .
-      dockerfile: Dockerfile.server
     image: docker.schema-bio.com/schemabio/sepiida-server:v0.2.0
     restart: unless-stopped
-    command:
-      - "-p=9090"
-      - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
-      - "-query-key=/etc/sepiida/keys/query-keys.txt"
+    command: ["-p=9090", "-query-key=/etc/sepiida/keys/query-keys.txt"]
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SEPIIDA_KEY_REFRESH_SECONDS: ${SEPIIDA_KEY_REFRESH_SECONDS:-30}
-      SEPIIDA_AUTH_MODE: static
+      SEPIIDA_AUTH_MODE: ${SEPIIDA_AUTH_MODE:-static}
+      SEPIIDA_TASK_TOKEN_SECRET: ${SEPIIDA_TASK_TOKEN_SECRET:-}
     ports:
       - "${SERVER_PORT:-9090}:9090"
     volumes:
       - ${SEPIIDA_AGENT_KEY_FILE:-./agent-keys.txt}:/etc/sepiida/keys/agent-keys.txt:ro
       - ${SEPIIDA_QUERY_KEY_FILE:-./query-keys.txt}:/etc/sepiida/keys/query-keys.txt:ro
-    networks:
-      - sepiida
-
-  # ── Sepiida Agent ─────────────────────────────────────────────────────────
-  agent:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-    restart: unless-stopped
-    command:
-      - "-s=http://server:9090"
-    environment:
-      # Empty by default so misconfigured token-based deployments fail fast
-      # instead of silently retrying with an unauthorised static key.
-      SEPIIDA_AGENT_KEY: ${SEPIIDA_AGENT_KEY:-}
-      SEPIIDA_AGENT_ID: ${SEPIIDA_AGENT_ID:-agent-001}
-      SEPIIDA_AGENT_INTERVAL: ${SEPIIDA_AGENT_INTERVAL:-60}
-      SEPIIDA_WATCH_DIRS: ${SEPIIDA_WATCH_DIRS:-/data/output}
-      SEPIIDA_ARCHIVE_URL: ${SEPIIDA_ARCHIVE_URL:-}
-      SEPIIDA_ARCHIVE_KEY_ID: ${SEPIIDA_ARCHIVE_KEY_ID:-}
-      SEPIIDA_ARCHIVE_KEY_SECRET: ${SEPIIDA_ARCHIVE_KEY_SECRET:-}
-      SEPIIDA_ARCHIVE_TIMEOUT: ${SEPIIDA_ARCHIVE_TIMEOUT:-30m}
-      SEPIIDA_TASK_TOKEN: ${SEPIIDA_TASK_TOKEN:-}
-    volumes:
-      # Mount the directories the agent should watch for MiniWDL workflow outputs.
-      # Each watched directory should contain UUID-named subdirectories with
-      # _LAST symlinks pointing to the current execution directory. The mount
-      # must be writable because the agent stores its idempotency state in each
-      # UUID directory as .sepiida.json.
-      - ${SEPIIDA_WATCH_HOST_DIR:-./output}:/data/output:rw
-      # If archive is enabled, mount or bind the archive destination as well.
-      - ${SEPIIDA_ARCHIVE_HOST_DIR:-./archive}:/data/archive
-    depends_on:
-      - server
-    networks:
-      - sepiida
-
-networks:
-  sepiida:
-    driver: bridge
