@@ -18,7 +18,10 @@ services:
       context: .
     image: docker.schema-bio.com/schemabio/sepiida-server:v0.2.0
     restart: unless-stopped
-    command: ["-p=9090", "-query-key=/etc/sepiida/keys/query-keys.txt"]
+    command:
+      - "-p=9090"
+      - "-agent-key=/etc/sepiida/keys/agent-keys.txt"
+      - "-query-key=/etc/sepiida/keys/query-keys.txt"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SEPIIDA_KEY_REFRESH_SECONDS: ${SEPIIDA_KEY_REFRESH_SECONDS:-30}

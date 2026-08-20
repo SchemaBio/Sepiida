@@ -42,9 +42,6 @@ USER sepiida
 
 EXPOSE 9090
 
-ENV SEPIIDA_AGENT_KEY_FILE=/etc/sepiida/keys/agent-keys.txt \
-    SEPIIDA_QUERY_KEY_FILE=/etc/sepiida/keys/query-keys.txt
-
 LABEL org.opencontainers.image.title="Sepiida Server" \
       org.opencontainers.image.description="MiniWDL status collection server" \
       org.opencontainers.image.source="https://github.com/SchemaBio/Sepiida"
