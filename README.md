@@ -1,6 +1,8 @@
 # Sepiida
 
-用于采集MiniWDL分析状态的系统。
+**简体中文** | [English](./README.en.md)
+
+用于采集[MiniWDL](https://github.com/chanzuckerberg/miniwdl)分析状态的系统。
 
 ## 目录结构设计
 
@@ -275,12 +277,13 @@ curl -H "Authorization: Bearer my-query-key-001" \
 
 ## API接口
 
-### Agent API（需要Agent Key）
+### Agent API（需要 Agent Key 或 Task Token）
 
 | 接口 | 说明 |
 |------|------|
 | `POST /api/v1/progress` | 推送进度数据 |
 | `POST /api/v1/workflow/output` | 推送outputs.json |
+| `POST /api/v1/workflow/archive` | 报告归档完成状态 |
 
 ### Query API（需要Query Key）
 
@@ -368,7 +371,7 @@ CREATE INDEX idx_tasks_uuid ON tasks(uuid);
 
 ## 依赖
 
-- Go 1.21+
+- Go 1.25+
 - PostgreSQL
 - [minio-go](https://github.com/minio/minio-go) - S3兼容对象存储客户端（归档功能）
 - [parquet-go](https://github.com/parquet-go/parquet-go) - Parquet文件写入（文本文件合并）
