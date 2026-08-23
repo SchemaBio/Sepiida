@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
@@ -19,6 +23,8 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
 )
+
+const serverShutdownTimeout = 30 * time.Second
 
 func main() {
 	// Command line flags
@@ -60,10 +66,12 @@ func main() {
 	if *keyRefresh <= 0 {
 		log.Fatal("Error: -key-refresh must be greater than 0 seconds.")
 	}
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 
 	// Initialize multi key manager
 	mkm := apikey.NewMultiKeyManager(*agentKeyFile, *queryKeyFile)
-	mkm.Start(time.Duration(*keyRefresh) * time.Second)
+	mkm.StartContext(ctx, time.Duration(*keyRefresh)*time.Second)
 
 	// Wait for initial key load
 	time.Sleep(100 * time.Millisecond)
@@ -98,7 +106,7 @@ func main() {
 	defer databaseObj.Close()
 
 	// Initialize database tables
-	if err := databaseObj.Initialize(context.Background()); err != nil {
+	if err := databaseObj.Initialize(ctx); err != nil {
 		log.Fatalf("Failed to initialize database tables: %v", err)
 	}
 
@@ -187,19 +195,56 @@ func main() {
 	log.Printf("Query Key File: %s (%d keys)", *queryKeyFile, queryKeyCount)
 	log.Printf("Write Authentication Mode: %s", *authMode)
 
-	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           securityHeaders(router),
+	server := newHTTPServer(listenAddr, securityHeaders(router))
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Fatalf("Failed to listen on %s: %v", server.Addr, err)
+	}
+	if err := serveHTTPServer(ctx, server, listener); err != nil {
+		_ = databaseObj.Close()
+		log.Printf("Server stopped with an error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    32 << 10,
 	}
+}
 
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+func serveHTTPServer(ctx context.Context, server *http.Server, listener net.Listener) error {
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Serve(listener) }()
+
+	select {
+	case err := <-errCh:
+		return normalizeServerError(err)
+	case <-ctx.Done():
+		log.Println("Shutting down...")
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		closeErr := server.Close()
+		serveErr := normalizeServerError(<-errCh)
+		return errors.Join(fmt.Errorf("graceful shutdown: %w", err), closeErr, serveErr)
+	}
+	return normalizeServerError(<-errCh)
+}
+
+func normalizeServerError(err error) error {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func normalizeAuthMode(raw string) (string, error) {

@@ -2,6 +2,7 @@ package apikey
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -65,6 +66,11 @@ func NewKeyManager(keyFile string) *KeyManager {
 // Start starts the key file watcher
 // It periodically checks the key file for updates
 func (km *KeyManager) Start(interval time.Duration) {
+	km.StartContext(context.Background(), interval)
+}
+
+// StartContext starts the key file watcher and stops it when ctx is canceled.
+func (km *KeyManager) StartContext(ctx context.Context, interval time.Duration) {
 	if strings.TrimSpace(km.keyFile) == "" {
 		return
 	}
@@ -82,9 +88,14 @@ func (km *KeyManager) Start(interval time.Duration) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			if err := km.loadKeys(); err != nil {
-				log.Printf("Warning: failed to refresh key file %s: %v", km.keyFile, err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := km.loadKeys(); err != nil {
+					log.Printf("Warning: failed to refresh key file %s: %v", km.keyFile, err)
+				}
 			}
 		}
 	}()
@@ -290,6 +301,12 @@ func NewMultiKeyManager(agentKeyFile, queryKeyFile string) *MultiKeyManager {
 func (mkm *MultiKeyManager) Start(interval time.Duration) {
 	mkm.agentKeyMgr.Start(interval)
 	mkm.queryKeyMgr.Start(interval)
+}
+
+// StartContext starts all key managers and ties their watchers to ctx.
+func (mkm *MultiKeyManager) StartContext(ctx context.Context, interval time.Duration) {
+	mkm.agentKeyMgr.StartContext(ctx, interval)
+	mkm.queryKeyMgr.StartContext(ctx, interval)
 }
 
 // ValidateAgentKey checks if a key is valid for agent operations (push data)

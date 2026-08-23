@@ -1,9 +1,11 @@
 package apikey
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReloadTrimsKeyLines(t *testing.T) {
@@ -130,6 +132,27 @@ func TestEmptyKeyFileIsAllowedForDisabledKeyManager(t *testing.T) {
 	}
 	if manager.Count() != 0 {
 		t.Fatalf("expected no keys for empty key file, got %v", manager.List())
+	}
+}
+
+func TestKeyWatcherStopsWhenContextIsCanceled(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(keyFile, []byte("key-1-0123456789\n"), 0o644); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := NewKeyManager(keyFile)
+	manager.StartContext(ctx, 10*time.Millisecond)
+	if !manager.Validate("key-1-0123456789") {
+		t.Fatal("expected initial key to be loaded")
+	}
+	cancel()
+	if err := os.WriteFile(keyFile, []byte("key-2-0123456789\n"), 0o644); err != nil {
+		t.Fatalf("replace key file: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if manager.Validate("key-2-0123456789") {
+		t.Fatal("key watcher reloaded after its context was canceled")
 	}
 }
 
