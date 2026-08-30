@@ -78,6 +78,72 @@ func TestArchiveReturnsManifest(t *testing.T) {
 	}
 }
 
+func TestArchiveWorkflowWithPrefixSeparatesWorkflowAndAttemptIdentity(t *testing.T) {
+	ctx := context.Background()
+	executionDir := t.TempDir()
+	taskUUID := "9e906aba-75f0-4b68-a355-5138b0f07c42"
+	attemptID := "2897aa33-054d-4a00-88c6-40701d0cf491"
+	outputFile := filepath.Join(executionDir, "result.bam")
+
+	mustWrite(t, filepath.Join(executionDir, "workflow.log"), "workflow log")
+	mustWrite(t, filepath.Join(executionDir, "inputs.json"), `{"input":"value"}`)
+	mustWrite(t, outputFile, "bam data")
+	mustWriteJSON(t, filepath.Join(executionDir, "outputs.json"), map[string]string{"bam": outputFile})
+
+	backend := &memoryBackend{
+		basePath: "https://storage.example/archive",
+		uploads:  make(map[string]string),
+	}
+	archiver := NewArchiver(backend)
+
+	result, err := archiver.ArchiveWorkflowWithPrefix(ctx, taskUUID, "run-1", attemptID, executionDir)
+	if err != nil {
+		t.Fatalf("ArchiveWorkflowWithPrefix returned error: %v", err)
+	}
+	if result.UUID != taskUUID || result.WorkflowID != "run-1" {
+		t.Fatalf("workflow identity was changed: %+v", result)
+	}
+	if result.ObjectPrefix != attemptID || result.KeyPrefix != attemptID || result.OutputsResolvedKey != attemptID+"/outputs.resolved.json" {
+		t.Fatalf("attempt prefix was not applied: %+v", result)
+	}
+	if _, ok := backend.uploads[attemptID+"/result.bam"]; !ok {
+		t.Fatalf("output was not stored below attempt prefix: %v", backend.uploads)
+	}
+	if _, ok := backend.uploads[taskUUID+"/result.bam"]; ok {
+		t.Fatalf("output was incorrectly stored below task UUID: %v", backend.uploads)
+	}
+	rewritten := backend.uploads[result.OutputsResolvedKey]
+	if !strings.Contains(rewritten, backend.basePath+"/"+attemptID+"/result.bam") {
+		t.Fatalf("rewritten outputs did not use attempt prefix: %s", rewritten)
+	}
+}
+
+func TestValidateArchivePrefix(t *testing.T) {
+	valid := "2897aa33-054d-4a00-88c6-40701d0cf491"
+	for _, prefix := range []string{"", valid} {
+		if err := ValidateArchivePrefix(prefix); err != nil {
+			t.Fatalf("expected archive prefix %q to be valid: %v", prefix, err)
+		}
+	}
+	for _, prefix := range []string{"attempt-1", "../escape", valid + "/nested", "2897aa33-054d-4a00-88c6-40701d0cf49"} {
+		if err := ValidateArchivePrefix(prefix); err == nil {
+			t.Fatalf("expected archive prefix %q to be rejected", prefix)
+		}
+	}
+}
+
+func TestArchiveWorkflowWithPrefixRejectsInvalidPrefix(t *testing.T) {
+	backend := &memoryBackend{basePath: "https://storage.example/archive", uploads: make(map[string]string)}
+	archiver := NewArchiver(backend)
+	result, err := archiver.ArchiveWorkflowWithPrefix(context.Background(), "task-uuid", "run-1", "../escape", t.TempDir())
+	if err == nil {
+		t.Fatal("expected invalid archive prefix to be rejected")
+	}
+	if result == nil || result.UUID != "task-uuid" || len(backend.uploads) != 0 {
+		t.Fatalf("invalid prefix caused unexpected archive side effects: result=%+v uploads=%v", result, backend.uploads)
+	}
+}
+
 func TestNewFromPathSupportsLocalArchive(t *testing.T) {
 	ctx := context.Background()
 	executionDir := t.TempDir()

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/SchemaBio/Sepiida/internal/agent/pathsafe"
@@ -27,6 +28,22 @@ const (
 	maxNestedJSONBytes      = 1 << 20  // nested JSON references inside outputs
 	maxJSONResolveDepth     = 32
 )
+
+var archivePrefixPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
+
+// ValidateArchivePrefix validates the optional object-storage prefix used for
+// one concrete execution attempt.  An empty value deliberately means "use the
+// workflow UUID" for backwards compatibility with self-deployed agents.
+func ValidateArchivePrefix(prefix string) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	if !archivePrefixPattern.MatchString(prefix) {
+		return fmt.Errorf("archive prefix must be a standard UUID")
+	}
+	return nil
+}
 
 // NewArchiver creates a new archiver with the given backend.
 func NewArchiver(backend Backend) *Archiver {
@@ -189,6 +206,21 @@ func (a *Archiver) Archive(ctx context.Context, uuid string, executionDir string
 // ArchiveWorkflow archives a completed workflow and records the concrete
 // workflow ID in the result so the server can update the correct execution.
 func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID string, executionDir string) (*model.ArchiveResult, error) {
+	return a.ArchiveWorkflowWithPrefix(ctx, uuid, workflowID, "", executionDir)
+}
+
+// ArchiveWorkflowWithPrefix archives a completed workflow while allowing the
+// object-storage prefix to identify a concrete execution attempt separately
+// from the stable workflow UUID reported to Sepiida.  An empty prefix retains
+// the historical UUID-based layout.
+func (a *Archiver) ArchiveWorkflowWithPrefix(ctx context.Context, uuid string, workflowID string, archivePrefix string, executionDir string) (*model.ArchiveResult, error) {
+	archivePrefix = strings.TrimSpace(archivePrefix)
+	if archivePrefix == "" {
+		archivePrefix = uuid
+	} else if err := ValidateArchivePrefix(archivePrefix); err != nil {
+		return &model.ArchiveResult{UUID: uuid, WorkflowID: workflowID}, err
+	}
+
 	archived := 0
 	var archiveErrs []error
 	result := &model.ArchiveResult{
@@ -196,9 +228,9 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 		WorkflowID:         workflowID,
 		ArchiveBase:        a.backend.BasePath(),
 		BasePath:           a.backend.BasePath(),
-		OutputsResolvedKey: uuid + "/outputs.resolved.json",
-		ObjectPrefix:       uuid,
-		KeyPrefix:          uuid,
+		OutputsResolvedKey: archivePrefix + "/outputs.resolved.json",
+		ObjectPrefix:       archivePrefix,
+		KeyPrefix:          archivePrefix,
 	}
 
 	executionDir, err := pathsafe.RealPath(executionDir)
@@ -208,7 +240,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 
 	// 1. Archive workflow.log
 	logPath := filepath.Join(executionDir, "workflow.log")
-	if err := a.archiveFile(ctx, uuid, executionDir, logPath); err != nil {
+	if err := a.archiveFile(ctx, archivePrefix, executionDir, logPath); err != nil {
 		log.Printf("Warning: failed to archive workflow.log for %s: %v", uuid, err)
 		archiveErrs = append(archiveErrs, fmt.Errorf("archive workflow.log: %w", err))
 	} else {
@@ -217,7 +249,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 
 	// 2. Archive original outputs.json
 	outputsPath := filepath.Join(executionDir, "outputs.json")
-	if err := a.archiveFile(ctx, uuid, executionDir, outputsPath); err != nil {
+	if err := a.archiveFile(ctx, archivePrefix, executionDir, outputsPath); err != nil {
 		log.Printf("Warning: failed to archive outputs.json for %s: %v", uuid, err)
 		archiveErrs = append(archiveErrs, fmt.Errorf("archive outputs.json: %w", err))
 	} else {
@@ -226,7 +258,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 
 	// 3. Archive inputs.json
 	inputsPath := filepath.Join(executionDir, "inputs.json")
-	if err := a.archiveFile(ctx, uuid, executionDir, inputsPath); err != nil {
+	if err := a.archiveFile(ctx, archivePrefix, executionDir, inputsPath); err != nil {
 		log.Printf("Warning: failed to archive inputs.json for %s: %v", uuid, err)
 		archiveErrs = append(archiveErrs, fmt.Errorf("archive inputs.json: %w", err))
 	} else {
@@ -250,9 +282,9 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 		}
 	}
 
-	// Prepend UUID to all archive keys
+	// Prepend the concrete execution prefix to all archive keys.
 	for origPath, relKey := range pathMap {
-		pathMap[origPath] = uuid + "/" + relKey
+		pathMap[origPath] = archivePrefix + "/" + relKey
 	}
 
 	for origPath, archiveKey := range pathMap {
@@ -323,7 +355,7 @@ func (a *Archiver) ArchiveWorkflow(ctx context.Context, uuid string, workflowID 
 	}
 
 	// 7. Upload rewritten outputs.json with archive paths
-	if err := a.uploadRewrittenOutputs(ctx, uuid, resolvedJSON, pathMap); err != nil {
+	if err := a.uploadRewrittenOutputs(ctx, archivePrefix, resolvedJSON, pathMap); err != nil {
 		result.ArchivedCount = archived
 		return result, fmt.Errorf("upload rewritten outputs.json: %w", err)
 	}

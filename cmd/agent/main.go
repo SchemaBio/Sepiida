@@ -28,6 +28,7 @@ func main() {
 	archiveKeyID := flag.String("archive-key-id", os.Getenv("SEPIIDA_ARCHIVE_KEY_ID"), "access key ID for object storage (overrides provider env vars); env: SEPIIDA_ARCHIVE_KEY_ID")
 	archiveKeySecret := flag.String("archive-key-secret", os.Getenv("SEPIIDA_ARCHIVE_KEY_SECRET"), "secret access key for object storage (overrides provider env vars); env: SEPIIDA_ARCHIVE_KEY_SECRET")
 	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
+	archivePrefix := flag.String("archive-prefix", os.Getenv("SEPIIDA_ARCHIVE_PREFIX"), "object-storage prefix for this execution attempt (standard UUID); env: SEPIIDA_ARCHIVE_PREFIX")
 	taskToken := flag.String("task-token", os.Getenv("SEPIIDA_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
 	flag.Parse()
 
@@ -47,6 +48,9 @@ func main() {
 	}
 	if err := validateAgentCredentials(*apiKey, *taskToken); err != nil {
 		log.Fatal(err)
+	}
+	if err := archiver.ValidateArchivePrefix(*archivePrefix); err != nil {
+		log.Fatalf("invalid archive prefix: %v", err)
 	}
 	if *interval <= 0 {
 		log.Fatal("Error: -i poll interval must be greater than 0 seconds.")
@@ -89,11 +93,11 @@ func main() {
 	defer ticker.Stop()
 
 	// Run first collection immediately
-	runCollection(progressCollector, httpSender, arch, *archiveTimeout)
+	runCollection(progressCollector, httpSender, arch, *archiveTimeout, *archivePrefix)
 
 	// Then run on interval
 	for range ticker.C {
-		runCollection(progressCollector, httpSender, arch, *archiveTimeout)
+		runCollection(progressCollector, httpSender, arch, *archiveTimeout, *archivePrefix)
 	}
 }
 
@@ -198,7 +202,7 @@ func redactURLForLog(raw string) string {
 	return u.String()
 }
 
-func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver, archiveTimeout time.Duration) {
+func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver, archiveTimeout time.Duration, archivePrefix string) {
 	log.Println("Collecting workflow progress...")
 
 	results, err := collector.Collect()
@@ -249,7 +253,7 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 			state := result.State
 			if state != nil && !state.Archived {
 				ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
-				archiveResult, err := arch.ArchiveWorkflow(ctx, uuid, workflowID, result.ExecutionDir)
+				archiveResult, err := arch.ArchiveWorkflowWithPrefix(ctx, uuid, workflowID, archivePrefix, result.ExecutionDir)
 				cancel()
 				if err != nil {
 					log.Printf("Failed to archive for UUID %s: %v", uuid, err)

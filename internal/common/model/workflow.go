@@ -54,11 +54,14 @@ type WorkflowOutputRequest struct {
 // The alias fields keep the wire format compatible with adjacent services that
 // use either archive_base/base_path or object_prefix/key_prefix naming.
 type ArchiveResult struct {
-	UUID               string `json:"uuid"`
-	WorkflowID         string `json:"workflow_id,omitempty"`
-	AgentID            string `json:"agent_id,omitempty"`
-	ArchiveBase        string `json:"archive_base,omitempty"`
-	BasePath           string `json:"base_path,omitempty"`
+	UUID        string `json:"uuid"`
+	WorkflowID  string `json:"workflow_id,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
+	ArchiveBase string `json:"archive_base,omitempty"`
+	BasePath    string `json:"base_path,omitempty"`
+	// OutputsResolvedKey/ObjectPrefix/KeyPrefix identify the concrete archive
+	// prefix.  This can be an execution attempt ID while UUID remains the
+	// stable workflow/sample identity reported to Sepiida.
 	OutputsResolvedKey string `json:"outputs_resolved_key,omitempty"`
 	ObjectPrefix       string `json:"object_prefix,omitempty"`
 	KeyPrefix          string `json:"key_prefix,omitempty"`

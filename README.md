@@ -158,6 +158,7 @@ key-003
 | `-i` | 推送间隔（秒） | 60 |
 | `-w` | 监控目录（UUID目录的父目录） | ./output |
 | `-archive` | 对象存储归档路径（见下方说明） | （不归档） |
+| `-archive-prefix` | 当前执行尝试的对象存储前缀（标准 UUID）；为空时使用监控目录 UUID | （使用 UUID） |
 | `-archive-key-id` | 对象存储 Access Key ID（覆盖环境变量） | （读取环境变量） |
 | `-archive-key-secret` | 对象存储 Secret Access Key（覆盖环境变量） | （读取环境变量） |
 
