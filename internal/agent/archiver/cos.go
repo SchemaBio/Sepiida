@@ -90,16 +90,28 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 
 	// Build transport with credentials
 	var transport http.RoundTripper
-	if accessKeyID != "" && secretAccessKey != "" {
+	if endpoint := os.Getenv("SEPIIDA_CREDENTIALS_URL"); endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" {
+			return nil, fmt.Errorf("credential endpoint must be an HTTPS URL")
+		}
+		token := os.Getenv("SEPIIDA_TASK_TOKEN")
+		if token == "" {
+			return nil, fmt.Errorf("task token required for credential renewal")
+		}
+		transport = &renewableCOSTransport{endpoint: endpoint, token: token}
+	} else if accessKeyID != "" && secretAccessKey != "" {
 		transport = &cos.AuthorizationTransport{
-			SecretID:  accessKeyID,
-			SecretKey: secretAccessKey,
+			SecretID:     accessKeyID,
+			SecretKey:    secretAccessKey,
+			SessionToken: os.Getenv("COS_SESSION_TOKEN"),
 		}
 	} else {
 		// Read from environment variables
 		transport = &cos.AuthorizationTransport{
-			SecretID:  os.Getenv("COS_SECRET_ID"),
-			SecretKey: os.Getenv("COS_SECRET_KEY"),
+			SecretID:     os.Getenv("COS_SECRET_ID"),
+			SecretKey:    os.Getenv("COS_SECRET_KEY"),
+			SessionToken: os.Getenv("COS_SESSION_TOKEN"),
 		}
 	}
 

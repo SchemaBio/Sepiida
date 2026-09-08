@@ -144,7 +144,14 @@ func (h *ProgressHandler) HandleGetWorkflow(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		// Prefer UUID lookup
-		workflow, err = h.service.GetWorkflowByUUID(r.Context(), uuid)
+		if agentID := r.URL.Query().Get("agent_id"); agentID != "" {
+			if !validateIdentifier(w, "agent_id", agentID) {
+				return
+			}
+			workflow, err = h.service.GetWorkflowByAttempt(r.Context(), uuid, agentID)
+		} else {
+			workflow, err = h.service.GetWorkflowByUUID(r.Context(), uuid)
+		}
 	} else if id != "" {
 		if !validateIdentifier(w, "id", id) {
 			return

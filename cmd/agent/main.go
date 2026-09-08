@@ -15,7 +15,26 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/agent/collector"
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
 	"github.com/SchemaBio/Sepiida/internal/agent/sender"
+	"github.com/SchemaBio/Sepiida/internal/agent/state"
+	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
+
+type progressCollector interface {
+	Collect() ([]collector.CollectResult, error)
+	SaveState(string, *state.WorkflowState) error
+	MarkOutputsPushed(string) error
+	MarkArchived(string) error
+}
+
+type progressSender interface {
+	SendProgress(*model.WorkflowProgress) error
+	SendOutput(string, string, string) error
+	NotifyArchived(*model.ArchiveResult) error
+}
+
+type workflowArchiver interface {
+	ArchiveWorkflowWithPrefix(context.Context, string, string, string, string) (*model.ArchiveResult, error)
+}
 
 func main() {
 	// Command line flags
@@ -87,18 +106,29 @@ func main() {
 		log.Printf("Archive timeout: %v", *archiveTimeout)
 	}
 	progressCollector.SetArchiveEnabled(arch != nil)
+	// Keep a genuinely nil interface when archiving is disabled.  Passing a
+	// typed nil *archiver.Archiver directly to runCollection would make the
+	// interface non-nil and cause the collection loop to call through it.
+	workflowArch := workflowArchiverFor(arch)
 
 	// Start polling loop
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	// Run first collection immediately
-	runCollection(progressCollector, httpSender, arch, *archiveTimeout, *archivePrefix)
+	runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix)
 
 	// Then run on interval
 	for range ticker.C {
-		runCollection(progressCollector, httpSender, arch, *archiveTimeout, *archivePrefix)
+		runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix)
 	}
+}
+
+func workflowArchiverFor(arch *archiver.Archiver) workflowArchiver {
+	if arch == nil {
+		return nil
+	}
+	return arch
 }
 
 func defaultServerURL() string {
@@ -202,7 +232,7 @@ func redactURLForLog(raw string) string {
 	return u.String()
 }
 
-func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSender, arch *archiver.Archiver, archiveTimeout time.Duration, archivePrefix string) {
+func runCollection(collector progressCollector, sender progressSender, arch workflowArchiver, archiveTimeout time.Duration, archivePrefix string) {
 	log.Println("Collecting workflow progress...")
 
 	results, err := collector.Collect()
@@ -252,23 +282,40 @@ func runCollection(collector *collector.ProgressCollector, sender *sender.HTTPSe
 		if arch != nil && result.Progress.Workflow.Status == "success" {
 			state := result.State
 			if state != nil && !state.Archived {
-				ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
-				archiveResult, err := arch.ArchiveWorkflowWithPrefix(ctx, uuid, workflowID, archivePrefix, result.ExecutionDir)
-				cancel()
-				if err != nil {
-					log.Printf("Failed to archive for UUID %s: %v", uuid, err)
-				} else {
+				// Once the object upload succeeds, retain its manifest in the local
+				// state before notifying the server.  If the callback is lost or the
+				// agent restarts, the next poll can resend the same manifest without
+				// re-uploading the execution.
+				archiveResult := state.ArchiveResult
+				if archiveResult == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), archiveTimeout)
+					uploaded, err := arch.ArchiveWorkflowWithPrefix(ctx, uuid, workflowID, archivePrefix, result.ExecutionDir)
+					cancel()
+					if err != nil {
+						log.Printf("Failed to archive for UUID %s: %v", uuid, err)
+						continue
+					}
+					archiveResult = uploaded
+					state.ArchiveResult = archiveResult
+					if err := collector.SaveState(result.UUIDDir, state); err != nil {
+						// The callback remains useful even when the local state store is
+						// temporarily unavailable.  MarkArchived below will retry the
+						// local write; a later poll may upload again if this write never
+						// recovered, and the archive key is idempotent.
+						log.Printf("Failed to persist archive manifest for UUID %s: %v", uuid, err)
+					}
 					log.Printf("Successfully archived %d items for UUID %s", archiveResult.ArchivedCount, uuid)
-					// Persist before marking so a failed progress report cannot trigger
-					// another archive of the same completed execution.
-					if err := collector.SaveState(result.UUIDDir, result.State); err != nil {
-						log.Printf("Failed to save archive state for UUID %s: %v", uuid, err)
-					} else if err := collector.MarkArchived(result.UUIDDir); err != nil {
-						log.Printf("Failed to mark archived: %v", err)
-					}
-					if err := sender.NotifyArchived(archiveResult); err != nil {
-						log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
-					}
+				}
+
+				// Archived is an acknowledgement marker, not an upload marker.  Do
+				// not set it until the server accepts the callback; otherwise a lost
+				// callback would make the agent stop retrying forever.
+				if err := sender.NotifyArchived(archiveResult); err != nil {
+					log.Printf("WARNING: failed to notify server of archive for UUID %s: %v", uuid, err)
+					continue
+				}
+				if err := collector.MarkArchived(result.UUIDDir); err != nil {
+					log.Printf("Failed to mark archived: %v", err)
 				}
 			}
 		}

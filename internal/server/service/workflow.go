@@ -32,11 +32,14 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 	progress.Workflow.UUID = progress.UUID
 	progress.Workflow.AgentID = progress.AgentID
 	rawWorkflowID := progress.Workflow.ID
-	storageWorkflowID, existing, err := s.resolveWorkflowForWrite(ctx, progress.UUID, rawWorkflowID)
+	storageWorkflowID, existing, err := s.resolveWorkflowForWrite(ctx, progress.UUID, rawWorkflowID, progress.AgentID)
 	if err != nil {
 		return err
 	}
 	progress.Workflow.ID = storageWorkflowID
+	if existing != nil && existing.AgentID != "" && existing.AgentID != progress.AgentID {
+		return errors.New("workflow belongs to another execution agent")
+	}
 
 	// Workflow.ID from MiniWDL is only unique inside a sample UUID. Store new
 	// executions under a UUID-qualified key to avoid collisions when two samples
@@ -95,10 +98,22 @@ func (s *WorkflowService) ProcessOutput(ctx context.Context, req *model.Workflow
 		// Prefer workflow ID because a UUID can have multiple executions. Do not
 		// fall back to "latest by UUID" when a concrete workflow was requested:
 		// that can attach outputs to the wrong execution.
-		req.WorkflowID, existing, err = s.resolveWorkflowForWrite(ctx, req.UUID, req.WorkflowID)
+		req.WorkflowID, existing, err = s.resolveWorkflowForWrite(ctx, req.UUID, req.WorkflowID, req.AgentID)
 		if err != nil {
 			return err
 		}
+		if existing != nil && existing.AgentID != "" && strings.TrimSpace(req.AgentID) != "" && existing.AgentID != req.AgentID {
+			return errors.New("workflow belongs to another execution agent")
+		}
+		if existing != nil && existing.AgentID == "" && strings.TrimSpace(req.AgentID) != "" {
+			existing.AgentID = req.AgentID
+		}
+	} else if strings.TrimSpace(req.AgentID) != "" {
+		// A task token always binds the writer to one execution agent.  Do not
+		// fall back to the newest workflow for the UUID when a legacy sender
+		// omitted workflow_id; another attempt may have become newer while this
+		// callback was in flight.
+		existing, err = s.GetWorkflowByAttempt(ctx, req.UUID, req.AgentID)
 	} else {
 		existing, err = s.db.GetWorkflowByUUID(ctx, req.UUID)
 		if err != nil {
@@ -139,18 +154,27 @@ func (s *WorkflowService) ListWorkflows(ctx context.Context, limit, offset int) 
 func (s *WorkflowService) MarkArchived(ctx context.Context, result *model.ArchiveResult) error {
 	normalizeArchiveResult(result)
 	if result.WorkflowID != "" {
-		workflowID, existing, err := s.resolveWorkflowForWrite(ctx, result.UUID, result.WorkflowID)
+		workflowID, existing, err := s.resolveWorkflowForWrite(ctx, result.UUID, result.WorkflowID, result.AgentID)
 		if err != nil {
 			return err
 		}
 		if existing == nil {
 			return ErrWorkflowNotFound
 		}
+		if existing.AgentID != "" && strings.TrimSpace(result.AgentID) != "" && existing.AgentID != result.AgentID {
+			return errors.New("workflow belongs to another execution agent")
+		}
 		result.WorkflowID = workflowID
 		return s.db.MarkArchived(ctx, result)
 	}
 
-	existing, err := s.db.GetWorkflowByUUID(ctx, result.UUID)
+	var existing *model.Workflow
+	var err error
+	if strings.TrimSpace(result.AgentID) != "" {
+		existing, err = s.GetWorkflowByAttempt(ctx, result.UUID, result.AgentID)
+	} else {
+		existing, err = s.db.GetWorkflowByUUID(ctx, result.UUID)
+	}
 	if err != nil {
 		return err
 	}
@@ -161,7 +185,11 @@ func (s *WorkflowService) MarkArchived(ctx context.Context, result *model.Archiv
 	return s.db.MarkArchived(ctx, result)
 }
 
-func (s *WorkflowService) resolveWorkflowForWrite(ctx context.Context, uuid string, workflowID string) (string, *model.Workflow, error) {
+func (s *WorkflowService) resolveWorkflowForWrite(ctx context.Context, uuid string, workflowID string, agentIDs ...string) (string, *model.Workflow, error) {
+	agentID := ""
+	if len(agentIDs) > 0 {
+		agentID = strings.TrimSpace(agentIDs[0])
+	}
 	storageID := storageWorkflowID(uuid, workflowID)
 
 	existing, err := s.db.GetWorkflow(ctx, storageID)
@@ -169,6 +197,18 @@ func (s *WorkflowService) resolveWorkflowForWrite(ctx context.Context, uuid stri
 		return storageID, nil, err
 	}
 	if existing != nil {
+		if agentID != "" && existing.AgentID != "" && existing.AgentID != agentID {
+			// MiniWDL run IDs normally contain a timestamp, but two attempts can
+			// still collide when they start in the same clock tick. Keep the
+			// historical UUID-qualified key for the first execution and isolate a
+			// later agent under an attempt-qualified key.
+			scopedID := scopedStorageWorkflowID(uuid, workflowID, agentID)
+			scoped, scopedErr := s.db.GetWorkflow(ctx, scopedID)
+			if scopedErr != nil {
+				return scopedID, nil, scopedErr
+			}
+			return scopedID, scoped, nil
+		}
 		return storageID, existing, nil
 	}
 
@@ -178,6 +218,33 @@ func (s *WorkflowService) resolveWorkflowForWrite(ctx context.Context, uuid stri
 			return storageID, nil, err
 		}
 		if legacy != nil && legacy.UUID == uuid {
+			if agentID != "" && legacy.AgentID != "" && legacy.AgentID != agentID {
+				scopedID := scopedStorageWorkflowID(uuid, workflowID, agentID)
+				scoped, scopedErr := s.db.GetWorkflow(ctx, scopedID)
+				if scopedErr != nil {
+					return scopedID, nil, scopedErr
+				}
+				return scopedID, scoped, nil
+			}
+			// A legacy row has no durable execution identity.  Only bind the
+			// first agent callback when the database can prove that this UUID has
+			// exactly one legacy candidate.  If several attempts share the UUID,
+			// guessing would attach progress or an archive to the wrong run.
+			if legacy.AgentID == "" {
+				if lister, ok := s.db.(interface {
+					ListWorkflowsByUUID(context.Context, string) ([]*model.Workflow, error)
+				}); ok {
+					candidates, listErr := lister.ListWorkflowsByUUID(ctx, uuid)
+					if listErr != nil {
+						return storageID, nil, listErr
+					}
+					if len(candidates) != 1 || candidates[0] == nil || candidates[0].ID != legacy.ID {
+						return storageID, nil, errors.New("legacy workflow execution identity is ambiguous; manual reconciliation required")
+					}
+				} else {
+					return storageID, nil, errors.New("legacy workflow execution identity cannot be verified; manual reconciliation required")
+				}
+			}
 			return workflowID, legacy, nil
 		}
 	}
@@ -192,6 +259,15 @@ func storageWorkflowID(uuid string, workflowID string) string {
 		return workflowID
 	}
 	return uuid + workflowStorageIDSeparator + workflowID
+}
+
+func scopedStorageWorkflowID(uuid, workflowID, agentID string) string {
+	base := storageWorkflowID(uuid, workflowID)
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" || strings.HasSuffix(base, workflowStorageIDSeparator+agentID) {
+		return base
+	}
+	return base + workflowStorageIDSeparator + agentID
 }
 
 func preserveArchiveFields(next *model.Workflow, existing *model.Workflow) {
@@ -224,4 +300,24 @@ func normalizeArchiveResult(result *model.ArchiveResult) {
 	if result.KeyPrefix == "" {
 		result.KeyPrefix = result.ObjectPrefix
 	}
+}
+
+// GetWorkflowByAttempt never falls back to another execution of a task.
+func (s *WorkflowService) GetWorkflowByAttempt(ctx context.Context, uuid, agentID string) (*model.Workflow, error) {
+	if store, ok := s.db.(interface {
+		GetWorkflowByAttempt(context.Context, string, string) (*model.Workflow, error)
+	}); ok {
+		return store.GetWorkflowByAttempt(ctx, uuid, agentID)
+	}
+	workflows, err := s.db.GetWorkflowsByAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	var latest *model.Workflow
+	for _, workflow := range workflows {
+		if workflow.UUID == uuid && workflow.AgentID == agentID && (latest == nil || workflow.CreatedAt.After(latest.CreatedAt)) {
+			latest = workflow
+		}
+	}
+	return latest, nil
 }

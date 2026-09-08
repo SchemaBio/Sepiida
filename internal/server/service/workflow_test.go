@@ -92,8 +92,30 @@ func (f *fakeDB) GetWorkflowByUUID(ctx context.Context, uuid string) (*model.Wor
 	return latest, nil
 }
 
+// ListWorkflowsByUUID mirrors the production database capability used to
+// verify that a legacy row is the only execution that can claim an agent
+// callback.  Keeping this method on the fake makes the legacy compatibility
+// tests exercise the same identity contract as PostgreSQL.
+func (f *fakeDB) ListWorkflowsByUUID(ctx context.Context, uuid string) ([]*model.Workflow, error) {
+	var result []*model.Workflow
+	for _, workflow := range f.workflows {
+		if workflow.UUID != uuid {
+			continue
+		}
+		cp := *workflow
+		result = append(result, &cp)
+	}
+	return result, nil
+}
+
 func (f *fakeDB) GetWorkflowsByAgent(ctx context.Context, agentID string) ([]*model.Workflow, error) {
-	return nil, nil
+	var result []*model.Workflow
+	for _, workflow := range f.workflows {
+		if workflow.AgentID == agentID {
+			result = append(result, workflow)
+		}
+	}
+	return result, nil
 }
 
 func (f *fakeDB) ListWorkflows(ctx context.Context, limit, offset int) ([]*model.Workflow, error) {
@@ -183,6 +205,39 @@ func TestProcessProgressCreatesNewExecutionForSameUUID(t *testing.T) {
 	}
 }
 
+func TestProcessProgressRejectsAmbiguousLegacyExecutionIdentity(t *testing.T) {
+	ctx := context.Background()
+	base := newFakeDB()
+	base.workflows["run-1"] = &model.Workflow{ID: "run-1", UUID: "sample-uuid", CreatedAt: time.Now().Add(-time.Hour)}
+	store := &legacyCandidatesDB{
+		fakeDB: base,
+		candidates: []*model.Workflow{
+			base.workflows["run-1"],
+			{ID: "run-2", UUID: "sample-uuid", CreatedAt: time.Now()},
+		},
+	}
+	service := NewWorkflowService(store)
+	err := service.ProcessProgress(ctx, &model.WorkflowProgress{
+		AgentID: "agent-1", UUID: "sample-uuid",
+		Workflow: model.Workflow{ID: "run-1", Status: model.WorkflowStatusRunning},
+	})
+	if err == nil {
+		t.Fatal("ambiguous legacy execution was silently bound to an agent")
+	}
+	if store.workflows["run-1"].AgentID != "" {
+		t.Fatalf("ambiguous legacy row was modified: %+v", store.workflows["run-1"])
+	}
+}
+
+type legacyCandidatesDB struct {
+	*fakeDB
+	candidates []*model.Workflow
+}
+
+func (f *legacyCandidatesDB) ListWorkflowsByUUID(context.Context, string) ([]*model.Workflow, error) {
+	return f.candidates, nil
+}
+
 func TestProcessProgressSeparatesSameRunIDAcrossUUIDs(t *testing.T) {
 	ctx := context.Background()
 	db := newFakeDB()
@@ -226,6 +281,83 @@ func TestProcessProgressSeparatesSameRunIDAcrossUUIDs(t *testing.T) {
 	}
 	if _, ok := db.tasks["sample-b:20260705_120000_SingleWES_call-Task"]; !ok {
 		t.Fatalf("sample-b task missing: keys=%v", mapKeys(db.tasks))
+	}
+}
+
+func TestProcessProgressSeparatesSameWorkflowIDAcrossAttempts(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+
+	makeProgress := func(agentID string) *model.WorkflowProgress {
+		return &model.WorkflowProgress{
+			AgentID: agentID,
+			UUID:    "sample-uuid",
+			Workflow: model.Workflow{
+				ID:     "same-run-id",
+				Name:   "Workflow",
+				Status: model.WorkflowStatusRunning,
+			},
+		}
+	}
+
+	if err := service.ProcessProgress(ctx, makeProgress("agent-1")); err != nil {
+		t.Fatalf("first ProcessProgress returned error: %v", err)
+	}
+	if err := service.ProcessProgress(ctx, makeProgress("agent-2")); err != nil {
+		t.Fatalf("second ProcessProgress returned error: %v", err)
+	}
+
+	firstID := "sample-uuid:same-run-id"
+	secondID := "sample-uuid:same-run-id:agent-2"
+	if _, ok := db.workflows[firstID]; !ok {
+		t.Fatalf("first attempt was not stored under the UUID-qualified key: keys=%v", mapKeys(db.workflows))
+	}
+	if _, ok := db.workflows[secondID]; !ok {
+		t.Fatalf("second attempt was not isolated under the agent-qualified key: keys=%v", mapKeys(db.workflows))
+	}
+	if len(db.workflows) != 2 {
+		t.Fatalf("same workflow ID across attempts should create two records, got %d", len(db.workflows))
+	}
+
+	if err := service.ProcessOutput(ctx, &model.WorkflowOutputRequest{
+		UUID:        "sample-uuid",
+		WorkflowID:  "same-run-id",
+		AgentID:     "agent-2",
+		OutputsJSON: `{"attempt":"second"}`,
+	}); err != nil {
+		t.Fatalf("second attempt output returned error: %v", err)
+	}
+	if got := db.workflows[secondID].OutputsJSON; got != `{"attempt":"second"}` {
+		t.Fatalf("second attempt output was not written to its own record: %q", got)
+	}
+	if got := db.workflows[firstID].OutputsJSON; got != "" {
+		t.Fatalf("second attempt output contaminated first attempt: %q", got)
+	}
+
+	if err := service.MarkArchived(ctx, &model.ArchiveResult{
+		UUID:        "sample-uuid",
+		WorkflowID:  "same-run-id",
+		AgentID:     "agent-2",
+		ArchiveBase: "archive-second",
+	}); err != nil {
+		t.Fatalf("second attempt archive returned error: %v", err)
+	}
+	if !db.workflows[secondID].Archived {
+		t.Fatalf("second attempt was not archived")
+	}
+	if db.workflows[firstID].Archived {
+		t.Fatalf("second attempt archive contaminated first attempt")
+	}
+
+	if err := service.ProcessProgress(ctx, makeProgress("agent-2")); err != nil {
+		t.Fatalf("follow-up progress for second attempt returned error: %v", err)
+	}
+	if db.workflows[firstID].Archived {
+		t.Fatalf("follow-up progress changed first attempt archive state")
+	}
+	if !db.workflows[secondID].Archived || db.workflows[secondID].ArchiveBase != "archive-second" {
+		t.Fatalf("follow-up progress did not preserve second attempt archive state: %+v", db.workflows[secondID])
 	}
 }
 
@@ -338,6 +470,7 @@ func TestMarkArchivedTargetsWorkflowID(t *testing.T) {
 	db.workflows["run-1"] = &model.Workflow{
 		ID:        "run-1",
 		UUID:      "sample-uuid",
+		AgentID:   "agent-old",
 		Name:      "Workflow",
 		Status:    model.WorkflowStatusSuccess,
 		CreatedAt: time.Now().Add(-time.Hour),
@@ -345,6 +478,7 @@ func TestMarkArchivedTargetsWorkflowID(t *testing.T) {
 	db.workflows["run-2"] = &model.Workflow{
 		ID:        "run-2",
 		UUID:      "sample-uuid",
+		AgentID:   "agent-current",
 		Name:      "Workflow",
 		Status:    model.WorkflowStatusRunning,
 		CreatedAt: time.Now(),
@@ -385,6 +519,46 @@ func TestProcessOutputRejectsUnknownWorkflow(t *testing.T) {
 	}
 }
 
+func TestProcessOutputUsesAgentWhenWorkflowIDIsOmitted(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+	old := time.Now().Add(-time.Hour)
+	newer := time.Now()
+	db.workflows["old-run"] = &model.Workflow{ID: "old-run", UUID: "sample-uuid", AgentID: "agent-old", CreatedAt: old}
+	db.workflows["new-run"] = &model.Workflow{ID: "new-run", UUID: "sample-uuid", AgentID: "agent-new", CreatedAt: newer}
+
+	err := service.ProcessOutput(ctx, &model.WorkflowOutputRequest{
+		UUID: "sample-uuid", AgentID: "agent-old", OutputsJSON: `{"result":"old"}`,
+	})
+	if err != nil {
+		t.Fatalf("ProcessOutput returned error: %v", err)
+	}
+	if got := db.workflows["old-run"].OutputsJSON; got != `{"result":"old"}` {
+		t.Fatalf("agent-bound output was written to the wrong execution: %q", got)
+	}
+	if got := db.workflows["new-run"].OutputsJSON; got != "" {
+		t.Fatalf("newer execution was modified by an old agent: %q", got)
+	}
+}
+
+func TestProcessOutputWithWorkflowIDRejectsAnotherAgent(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+	db.workflows["run-1"] = &model.Workflow{ID: "run-1", UUID: "sample-uuid", AgentID: "agent-current", CreatedAt: time.Now()}
+
+	err := service.ProcessOutput(ctx, &model.WorkflowOutputRequest{
+		UUID: "sample-uuid", WorkflowID: "run-1", AgentID: "agent-old", OutputsJSON: `{"result":"old"}`,
+	})
+	if err == nil {
+		t.Fatal("accepted output from another execution agent")
+	}
+	if db.workflows["run-1"].OutputsJSON != "" {
+		t.Fatal("mismatched agent modified the workflow output")
+	}
+}
+
 func TestMarkArchivedRejectsUnknownWorkflow(t *testing.T) {
 	ctx := context.Background()
 	db := newFakeDB()
@@ -399,10 +573,68 @@ func TestMarkArchivedRejectsUnknownWorkflow(t *testing.T) {
 	}
 }
 
+func TestMarkArchivedUsesAgentWhenWorkflowIDIsOmitted(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+	db.workflows["old-run"] = &model.Workflow{ID: "old-run", UUID: "sample-uuid", AgentID: "agent-old", CreatedAt: time.Now().Add(-time.Hour)}
+	db.workflows["new-run"] = &model.Workflow{ID: "new-run", UUID: "sample-uuid", AgentID: "agent-new", CreatedAt: time.Now()}
+
+	err := service.MarkArchived(ctx, &model.ArchiveResult{
+		UUID: "sample-uuid", AgentID: "agent-old", ArchiveBase: "archive-base", ObjectPrefix: "old-run",
+	})
+	if err != nil {
+		t.Fatalf("MarkArchived returned error: %v", err)
+	}
+	if !db.workflows["old-run"].Archived {
+		t.Fatal("agent-bound archive did not target the matching execution")
+	}
+	if db.workflows["new-run"].Archived {
+		t.Fatal("newer execution was incorrectly marked archived")
+	}
+}
+
+func TestMarkArchivedWithWorkflowIDRejectsAnotherAgent(t *testing.T) {
+	ctx := context.Background()
+	db := newFakeDB()
+	service := NewWorkflowService(db)
+	db.workflows["run-1"] = &model.Workflow{ID: "run-1", UUID: "sample-uuid", AgentID: "agent-current", CreatedAt: time.Now()}
+
+	err := service.MarkArchived(ctx, &model.ArchiveResult{
+		UUID: "sample-uuid", WorkflowID: "run-1", AgentID: "agent-old", ArchiveBase: "archive-base", ObjectPrefix: "old-run",
+	})
+	if err == nil {
+		t.Fatal("accepted archive from another execution agent")
+	}
+	if db.workflows["run-1"].Archived {
+		t.Fatal("mismatched agent archived the workflow")
+	}
+}
+
 func mapKeys[T any](m map[string]T) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+func TestGetWorkflowByAttemptNeverFallsBack(t *testing.T) {
+	store := newFakeDB()
+	service := NewWorkflowService(store)
+	ctx := context.Background()
+	store.workflows["old"] = &model.Workflow{ID: "old", UUID: "task", AgentID: "old-agent", CreatedAt: time.Now()}
+	store.workflows["current"] = &model.Workflow{ID: "current", UUID: "task", AgentID: "current-agent", CreatedAt: time.Now().Add(-time.Hour)}
+	got, err := service.GetWorkflowByAttempt(ctx, "task", "current-agent")
+	if err != nil || got == nil || got.ID != "current" {
+		t.Fatalf("wrong execution selected: %+v %v", got, err)
+	}
+	got, err = service.GetWorkflowByAttempt(ctx, "different-task", "current-agent")
+	if err != nil || got != nil {
+		t.Fatal("cross-task fallback")
+	}
+	got, err = service.GetWorkflowByAttempt(ctx, "task", "absent-agent")
+	if err != nil || got != nil {
+		t.Fatal("cross-attempt fallback")
+	}
 }

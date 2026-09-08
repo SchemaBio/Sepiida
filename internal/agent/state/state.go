@@ -22,6 +22,10 @@ type WorkflowState struct {
 	WorkflowStatus model.WorkflowStatus `json:"workflow_status"`
 	LastPushedAt   time.Time            `json:"last_pushed_at"`
 	OutputsPushed  bool                 `json:"outputs_pushed"`
+	// ArchiveResult is persisted after the object upload succeeds and before the
+	// server callback is attempted.  This lets a restarted agent resend the
+	// callback without uploading the same execution again.
+	ArchiveResult  *model.ArchiveResult `json:"archive_result,omitempty"`
 	Archived       bool                 `json:"archived"`
 	TaskStates     map[string]TaskState `json:"task_states"`
 	LogFileSize    int64                `json:"log_file_size"`
@@ -284,9 +288,18 @@ func (s *StateManager) newState(prevState *WorkflowState, uuid string, execution
 		if prevState.OutputsPushed && !newState.OutputsPushed {
 			newState.OutputsPushed = true
 		}
+		newState.ArchiveResult = cloneArchiveResult(prevState.ArchiveResult)
 		newState.Archived = prevState.Archived
 	}
 	return newState
+}
+
+func cloneArchiveResult(result *model.ArchiveResult) *model.ArchiveResult {
+	if result == nil {
+		return nil
+	}
+	copy := *result
+	return &copy
 }
 
 // createNewState creates a new workflow state from current data

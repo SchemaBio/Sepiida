@@ -99,6 +99,12 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 			)`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`,
+		// Older Sepiida deployments predate attempt-scoped workflow identity.
+		// Add the nullable column before creating the scoped indexes and before
+		// any read/write query references it. Existing rows are intentionally
+		// left NULL so a later agent callback can claim a legacy row only when
+		// its UUID and execution identity are unambiguous.
+		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS agent_id TEXT`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS archive_base TEXT DEFAULT ''`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS base_path TEXT DEFAULT ''`,
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS outputs_resolved_key TEXT DEFAULT ''`,
@@ -107,6 +113,7 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 		`ALTER TABLE workflows ADD COLUMN IF NOT EXISTS archived_count INTEGER DEFAULT 0`,
 		`CREATE INDEX IF NOT EXISTS idx_workflows_uuid ON workflows(uuid)`,
 		`CREATE INDEX IF NOT EXISTS idx_workflows_agent_id ON workflows(agent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_workflows_uuid_agent ON workflows(uuid, agent_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS tasks (
 				id TEXT PRIMARY KEY,
 				workflow_id TEXT NOT NULL,
@@ -162,24 +169,32 @@ func (p *PostgreSQL) CreateWorkflow(ctx context.Context, workflow *model.Workflo
 				object_prefix=CASE WHEN workflows.archived THEN workflows.object_prefix ELSE EXCLUDED.object_prefix END,
 				key_prefix=CASE WHEN workflows.archived THEN workflows.key_prefix ELSE EXCLUDED.key_prefix END,
 				archived_count=CASE WHEN workflows.archived THEN workflows.archived_count ELSE EXCLUDED.archived_count END,
-				updated_at=EXCLUDED.updated_at`
+				updated_at=EXCLUDED.updated_at
+				WHERE workflows.uuid = EXCLUDED.uuid
+				  AND (COALESCE(workflows.agent_id, '') = '' OR workflows.agent_id = EXCLUDED.agent_id)`
 	now := time.Now()
 	workflow.CreatedAt = now
 	workflow.UpdatedAt = now
 
-	_, err := p.db.ExecContext(ctx, query,
+	result, err := p.db.ExecContext(ctx, query,
 		workflow.ID, workflow.UUID, workflow.Name, workflow.Status,
 		workflow.StartTime, workflow.EndTime, workflow.OutputDir,
 		normalizeJSONB(workflow.OutputsJSON), workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
 		workflow.ArchiveBase, workflow.BasePath, workflow.OutputsResolvedKey,
 		workflow.ObjectPrefix, workflow.KeyPrefix, workflow.ArchivedCount,
 		workflow.CreatedAt, workflow.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows == 0 {
+		return fmt.Errorf("workflow execution identity conflict for %s", workflow.ID)
+	}
+	return nil
 }
 
 // UpdateWorkflow updates an existing workflow record
 func (p *PostgreSQL) UpdateWorkflow(ctx context.Context, workflow *model.Workflow) error {
-	query := `UPDATE workflows SET uuid=$1, name=$2, status=$3, start_time=$4, end_time=$5, output_dir=$6, outputs_json=$7, agent_id=$8, archived=$9, archived_at=$10, archive_base=$11, base_path=$12, outputs_resolved_key=$13, object_prefix=$14, key_prefix=$15, archived_count=$16, updated_at=$17 WHERE id=$18`
+	query := `UPDATE workflows SET uuid=$1, name=$2, status=$3, start_time=$4, end_time=$5, output_dir=$6, outputs_json=$7, agent_id=$8, archived=$9, archived_at=$10, archive_base=$11, base_path=$12, outputs_resolved_key=$13, object_prefix=$14, key_prefix=$15, archived_count=$16, updated_at=$17 WHERE id=$18 AND uuid=$19 AND ($20 = '' OR COALESCE(agent_id, '') = '' OR agent_id=$20)`
 	workflow.UpdatedAt = time.Now()
 
 	res, err := p.db.ExecContext(ctx, query,
@@ -187,13 +202,13 @@ func (p *PostgreSQL) UpdateWorkflow(ctx context.Context, workflow *model.Workflo
 		workflow.OutputDir, normalizeJSONB(workflow.OutputsJSON), workflow.AgentID, workflow.Archived, workflow.ArchivedAt,
 		workflow.ArchiveBase, workflow.BasePath, workflow.OutputsResolvedKey,
 		workflow.ObjectPrefix, workflow.KeyPrefix, workflow.ArchivedCount,
-		workflow.UpdatedAt, workflow.ID)
+		workflow.UpdatedAt, workflow.ID, workflow.UUID, workflow.AgentID)
 	if err != nil {
 		return err
 	}
 	rows, err := res.RowsAffected()
 	if err == nil && rows == 0 {
-		return sql.ErrNoRows
+		return fmt.Errorf("workflow execution identity conflict for %s", workflow.ID)
 	}
 	return nil
 }
@@ -204,22 +219,24 @@ func (p *PostgreSQL) MarkArchived(ctx context.Context, result *model.ArchiveResu
 	now := time.Now()
 	query := `
 		UPDATE workflows
-		SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9
-		WHERE id=$10`
+		SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9,
+			agent_id=CASE WHEN COALESCE(agent_id, '')='' THEN $10 ELSE agent_id END
+		WHERE id=$11`
 	workflowKey := result.WorkflowID
 	if workflowKey == "" {
 		query = `
 			UPDATE workflows
-			SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9
+			SET archived=$1, archived_at=$2, archive_base=$3, base_path=$4, outputs_resolved_key=$5, object_prefix=$6, key_prefix=$7, archived_count=$8, updated_at=$9,
+				agent_id=CASE WHEN COALESCE(agent_id, '')='' THEN $10 ELSE agent_id END
 			WHERE id = (
-				SELECT id FROM workflows WHERE uuid=$10 ORDER BY created_at DESC LIMIT 1
+				SELECT id FROM workflows WHERE uuid=$11 ORDER BY created_at DESC LIMIT 1
 			)`
 		workflowKey = result.UUID
 	}
 
 	res, err := p.db.ExecContext(ctx, query,
 		true, now, result.ArchiveBase, result.BasePath, result.OutputsResolvedKey,
-		result.ObjectPrefix, result.KeyPrefix, result.ArchivedCount, now, workflowKey)
+		result.ObjectPrefix, result.KeyPrefix, result.ArchivedCount, now, result.AgentID, workflowKey)
 	if err != nil {
 		return err
 	}
@@ -232,7 +249,7 @@ func (p *PostgreSQL) MarkArchived(ctx context.Context, result *model.ArchiveResu
 
 // GetWorkflow retrieves a workflow by ID
 func (p *PostgreSQL) GetWorkflow(ctx context.Context, id string) (*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, agent_id, archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE id=$1`
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE id=$1`
 	row := p.db.QueryRowContext(ctx, query, id)
 
 	workflow := &model.Workflow{}
@@ -252,8 +269,57 @@ func (p *PostgreSQL) GetWorkflow(ctx context.Context, id string) (*model.Workflo
 
 // GetWorkflowByUUID retrieves a workflow by UUID
 func (p *PostgreSQL) GetWorkflowByUUID(ctx context.Context, uuid string) (*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, agent_id, archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 ORDER BY created_at DESC LIMIT 1`
 	row := p.db.QueryRowContext(ctx, query, uuid)
+
+	workflow := &model.Workflow{}
+	err := row.Scan(&workflow.ID, &workflow.UUID, &workflow.Name, &workflow.Status, &workflow.StartTime,
+		&workflow.EndTime, &workflow.OutputDir, &workflow.OutputsJSON, &workflow.AgentID,
+		&workflow.Archived, &workflow.ArchivedAt, &workflow.ArchiveBase, &workflow.BasePath,
+		&workflow.OutputsResolvedKey, &workflow.ObjectPrefix, &workflow.KeyPrefix,
+		&workflow.ArchivedCount, &workflow.CreatedAt, &workflow.UpdatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return workflow, nil
+}
+
+// ListWorkflowsByUUID returns every execution for a UUID.  It is intentionally
+// separate from GetWorkflowByUUID (which returns only the newest row) so
+// legacy rows without agent_id can be checked for ambiguity before a callback
+// binds them to an execution agent.
+func (p *PostgreSQL) ListWorkflowsByUUID(ctx context.Context, uuid string) ([]*model.Workflow, error) {
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 ORDER BY created_at DESC, id`
+	rows, err := p.db.QueryContext(ctx, query, uuid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var workflows []*model.Workflow
+	for rows.Next() {
+		workflow := &model.Workflow{}
+		if err := rows.Scan(&workflow.ID, &workflow.UUID, &workflow.Name, &workflow.Status, &workflow.StartTime,
+			&workflow.EndTime, &workflow.OutputDir, &workflow.OutputsJSON, &workflow.AgentID,
+			&workflow.Archived, &workflow.ArchivedAt, &workflow.ArchiveBase, &workflow.BasePath,
+			&workflow.OutputsResolvedKey, &workflow.ObjectPrefix, &workflow.KeyPrefix,
+			&workflow.ArchivedCount, &workflow.CreatedAt, &workflow.UpdatedAt); err != nil {
+			return nil, err
+		}
+		workflows = append(workflows, workflow)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return workflows, nil
+}
+
+func (p *PostgreSQL) GetWorkflowByAttempt(ctx context.Context, uuid, agentID string) (*model.Workflow, error) {
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 1`
+	row := p.db.QueryRowContext(ctx, query, uuid, agentID)
 
 	workflow := &model.Workflow{}
 	err := row.Scan(&workflow.ID, &workflow.UUID, &workflow.Name, &workflow.Status, &workflow.StartTime,
@@ -272,7 +338,7 @@ func (p *PostgreSQL) GetWorkflowByUUID(ctx context.Context, uuid string) (*model
 
 // GetWorkflowsByAgent retrieves workflows by agent ID
 func (p *PostgreSQL) GetWorkflowsByAgent(ctx context.Context, agentID string) ([]*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, agent_id, archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE agent_id=$1 ORDER BY created_at DESC`
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE agent_id=$1 ORDER BY created_at DESC`
 	rows, err := p.db.QueryContext(ctx, query, agentID)
 	if err != nil {
 		return nil, err
@@ -300,7 +366,7 @@ func (p *PostgreSQL) GetWorkflowsByAgent(ctx context.Context, agentID string) ([
 
 // ListWorkflows lists workflows with pagination
 func (p *PostgreSQL) ListWorkflows(ctx context.Context, limit, offset int) ([]*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, agent_id, archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows ORDER BY created_at DESC LIMIT $1 OFFSET $2`
+	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows ORDER BY created_at DESC LIMIT $1 OFFSET $2`
 	rows, err := p.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
 		return nil, err

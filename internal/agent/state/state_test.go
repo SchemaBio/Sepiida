@@ -20,8 +20,12 @@ func TestHasStateChangedResetsIdempotencyFlagsForNewExecution(t *testing.T) {
 		WorkflowID:     "run-1",
 		WorkflowStatus: model.WorkflowStatusSuccess,
 		OutputsPushed:  true,
-		Archived:       true,
-		ExecutionDir:   filepath.Join(dir, "run-1"),
+		ArchiveResult: &model.ArchiveResult{
+			UUID: "sample-uuid", WorkflowID: "run-1", AgentID: "agent-1",
+			ArchiveBase: "https://storage.example/archive", ObjectPrefix: "attempt-1", ArchivedCount: 2,
+		},
+		Archived:     true,
+		ExecutionDir: filepath.Join(dir, "run-1"),
 	}
 	if err := manager.SaveState(dir, prev); err != nil {
 		t.Fatalf("SaveState() error = %v", err)
@@ -42,6 +46,9 @@ func TestHasStateChangedResetsIdempotencyFlagsForNewExecution(t *testing.T) {
 	if next.Archived {
 		t.Fatalf("new execution inherited Archived: %+v", next)
 	}
+	if next.ArchiveResult != nil {
+		t.Fatalf("new execution inherited archive manifest: %+v", next)
+	}
 }
 
 func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) {
@@ -57,6 +64,10 @@ func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) 
 		WorkflowID:     "run-1",
 		WorkflowStatus: model.WorkflowStatusSuccess,
 		OutputsPushed:  true,
+		ArchiveResult: &model.ArchiveResult{
+			UUID: "sample-uuid", WorkflowID: "run-1", AgentID: "agent-1",
+			ArchiveBase: "https://storage.example/archive", ObjectPrefix: "attempt-1", ArchivedCount: 2,
+		},
 		Archived:       true,
 		LogFileSize:    info.Size() + 1,
 		LogFileModTime: info.ModTime(),
@@ -80,6 +91,34 @@ func TestHasStateChangedPreservesIdempotencyFlagsForSameExecution(t *testing.T) 
 	}
 	if !next.Archived {
 		t.Fatalf("same execution did not preserve Archived: %+v", next)
+	}
+	if next.ArchiveResult == nil || next.ArchiveResult.ObjectPrefix != "attempt-1" {
+		t.Fatalf("same execution did not preserve archive manifest: %+v", next)
+	}
+	if next.ArchiveResult == prev.ArchiveResult {
+		t.Fatal("same execution reused mutable archive manifest pointer")
+	}
+}
+
+func TestMarkArchivedPreservesUploadedManifest(t *testing.T) {
+	dir := t.TempDir()
+	manager := NewStateManager()
+	state := &WorkflowState{
+		UUID: "sample-uuid", WorkflowID: "run-1", ExecutionDir: filepath.Join(dir, "run-1"),
+		ArchiveResult: &model.ArchiveResult{UUID: "sample-uuid", WorkflowID: "run-1", ObjectPrefix: "attempt-1"},
+	}
+	if err := manager.SaveState(dir, state); err != nil {
+		t.Fatalf("SaveState() error = %v", err)
+	}
+	if err := manager.MarkArchived(dir); err != nil {
+		t.Fatalf("MarkArchived() error = %v", err)
+	}
+	got, err := manager.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState() error = %v", err)
+	}
+	if got == nil || !got.Archived || got.ArchiveResult == nil || got.ArchiveResult.ObjectPrefix != "attempt-1" {
+		t.Fatalf("MarkArchived lost uploaded manifest: %+v", got)
 	}
 }
 
