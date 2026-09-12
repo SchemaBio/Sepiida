@@ -133,6 +133,12 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 			)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_uuid ON tasks(uuid)`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_workflow_id ON tasks(workflow_id)`,
+		`CREATE TABLE IF NOT EXISTS task_token_revocations (
+				jti TEXT PRIMARY KEY,
+				expires_at BIGINT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_task_token_revocations_expires_at ON task_token_revocations(expires_at)`,
 	}
 
 	for _, query := range queries {
@@ -141,6 +147,35 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// PersistTokenRevocation upserts a JTI and keeps the furthest expiration seen
+// for it. Repeated terminal callbacks are therefore harmless.
+func (p *PostgreSQL) PersistTokenRevocation(ctx context.Context, jti string, exp int64) error {
+	if strings.TrimSpace(jti) == "" {
+		return fmt.Errorf("jti is required")
+	}
+	if exp <= 0 {
+		return fmt.Errorf("expiration must be positive")
+	}
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO task_token_revocations (jti, expires_at)
+		VALUES ($1, $2)
+		ON CONFLICT (jti) DO UPDATE SET expires_at = GREATEST(task_token_revocations.expires_at, EXCLUDED.expires_at)`, jti, exp)
+	return err
+}
+
+func (p *PostgreSQL) IsTaskTokenRevoked(ctx context.Context, jti string, now int64) (bool, error) {
+	if strings.TrimSpace(jti) == "" {
+		return false, nil
+	}
+	var exists bool
+	err := p.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM task_token_revocations
+			WHERE jti = $1 AND expires_at >= $2
+		)`, jti, now).Scan(&exists)
+	return exists, err
 }
 
 // Close closes the database connection

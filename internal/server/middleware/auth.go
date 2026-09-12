@@ -7,6 +7,7 @@ import (
 
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
+	"github.com/SchemaBio/Sepiida/internal/common/tokenrevoke"
 )
 
 type contextKey string
@@ -21,11 +22,19 @@ type AgentAuthMiddleware struct {
 	keyMgr          *apikey.KeyManager
 	taskTokenSecret string
 	allowStaticKey  bool
+	revoked         *tokenrevoke.Store
+	requireAttempt  bool
 }
 
 // NewAgentAuthMiddleware creates a new agent authentication middleware
 func NewAgentAuthMiddleware(keyMgr *apikey.KeyManager, taskTokenSecret string, allowStaticKey bool) *AgentAuthMiddleware {
-	return &AgentAuthMiddleware{keyMgr: keyMgr, taskTokenSecret: taskTokenSecret, allowStaticKey: allowStaticKey}
+	return &AgentAuthMiddleware{keyMgr: keyMgr, taskTokenSecret: taskTokenSecret, allowStaticKey: allowStaticKey, requireAttempt: !allowStaticKey}
+}
+
+func (a *AgentAuthMiddleware) SetRevokeStore(store *tokenrevoke.Store) {
+	if a != nil {
+		a.revoked = store
+	}
 }
 
 // Middleware returns the authentication middleware function
@@ -57,6 +66,28 @@ func (a *AgentAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			if err != nil {
 				http.Error(w, "invalid task token", http.StatusUnauthorized)
 				return
+			}
+			if a.requireAttempt && strings.TrimSpace(claims.AttemptID) == "" {
+				http.Error(w, "task token attempt_id is required", http.StatusUnauthorized)
+				return
+			}
+			if claims.JTI != "" {
+				if a.revoked == nil {
+					// A task token without a revocation store cannot be checked
+					// safely. Fail closed so a misconfigured instance never accepts
+					// writes after a terminal execution has been revoked elsewhere.
+					http.Error(w, "token revocation service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				revoked, revokeErr := a.revoked.RevokedWithError(r.Context(), claims.JTI)
+				if revokeErr != nil {
+					http.Error(w, "token revocation service unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				if revoked {
+					http.Error(w, "task token revoked", http.StatusUnauthorized)
+					return
+				}
 			}
 			ctx := context.WithValue(r.Context(), taskTokenClaimsKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))

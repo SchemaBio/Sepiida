@@ -128,6 +128,12 @@ key-003
 > 自部署路线使用 `static`；SaaS 路线使用 `task-token` 并配置至少 32 字符的
 > `SEPIIDA_TASK_TOKEN_SECRET`，由 Squid 为每个任务签发写入令牌。
 
+SaaS `task-token` 的撤销记录持久化在 Sepiida PostgreSQL 的
+`task_token_revocations` 表中，Server 重启或多实例部署不会恢复已撤销令牌。
+撤销状态查询发生数据库错误时，Agent 写入会拒绝并返回服务不可用，避免在
+无法确认撤销状态时继续接收进度。生产环境应为 Server 配置独立数据库角色，
+并将 `SEPIIDA_TASK_TOKEN_SECRET` 与 Squid 保持一致。
+
 **参数说明：**
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
@@ -138,6 +144,12 @@ key-003
 | `-task-token-secret` | 每任务写入令牌的 HMAC 共享密钥（SaaS 与 Squid 一致） | 空 |
 | `-auth-mode` | `static` 或 `task-token` | task-token |
 | `-key-refresh` | Key文件刷新间隔（秒） | 30 |
+
+回调限流按来源拆分：服务间撤销请求按 IP 默认 600 次/分钟，Agent 进度、输出和
+归档回调按执行令牌默认 60 次/分钟。可通过
+`SEPIIDA_SERVICE_CALLBACK_RATE_LIMIT_PER_MINUTE` 和
+`SEPIIDA_NODE_CALLBACK_RATE_LIMIT_PER_MINUTE` 调整，超限响应带
+`Retry-After`；同一执行的正常回调不会与登录或查询请求竞争额度。
 
 ### 5. 启动Agent
 

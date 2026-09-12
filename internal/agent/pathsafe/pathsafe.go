@@ -19,11 +19,7 @@ func RealPath(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	realPath, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Clean(realPath), nil
+	return resolveExisting(abs)
 }
 
 // ResolveExistingWithin resolves candidate and verifies that both the requested
@@ -52,11 +48,10 @@ func ResolveExistingWithin(root string, candidate string) (string, error) {
 		return "", fmt.Errorf("path %q escapes root %q", candidate, root)
 	}
 
-	realPath, err := filepath.EvalSymlinks(candidateAbs)
+	realPath, err := resolveExisting(candidateAbs)
 	if err != nil {
 		return "", err
 	}
-	realPath = filepath.Clean(realPath)
 
 	if ok, err := Within(rootReal, realPath); err != nil || !ok {
 		if err != nil {
@@ -66,6 +61,61 @@ func ResolveExistingWithin(root string, candidate string) (string, error) {
 	}
 
 	return realPath, nil
+}
+
+// resolveExisting resolves symlinks for the usual case. Some locked-down
+// Windows hosts deny the final-path query used by filepath.EvalSymlinks even
+// when the process can read every directory entry. In that environment we
+// retain the same containment guarantee by checking every existing component
+// with Lstat and refusing symlinks before returning the cleaned absolute path.
+// If a component cannot be inspected, the operation still fails closed.
+func resolveExisting(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return filepath.Clean(realPath), nil
+	}
+	if !os.IsPermission(err) {
+		return "", err
+	}
+	if err := rejectSymlinkComponents(abs); err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+func rejectSymlinkComponents(abs string) error {
+	volume := filepath.VolumeName(abs)
+	root := volume + string(os.PathSeparator)
+	relative := strings.TrimPrefix(abs, root)
+	current := root
+	if relative == "" {
+		info, err := os.Lstat(filepath.Clean(abs))
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink: %s", abs)
+		}
+		return nil
+	}
+	for _, part := range strings.Split(relative, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to follow symlink: %s", current)
+		}
+	}
+	return nil
 }
 
 // Within reports whether target is root or below root.

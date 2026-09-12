@@ -10,6 +10,7 @@ import (
 
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
+	"github.com/SchemaBio/Sepiida/internal/common/tokenrevoke"
 )
 
 const testTaskTokenSecret = "0123456789abcdef0123456789abcdef"
@@ -21,6 +22,7 @@ func TestAgentAuthAcceptsTaskTokenAndSetsClaims(t *testing.T) {
 	}
 
 	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	middleware.SetRevokeStore(tokenrevoke.NewStore())
 	nextCalled := false
 	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
@@ -51,6 +53,7 @@ func TestAgentAuthAcceptsCaseInsensitiveBearer(t *testing.T) {
 	}
 
 	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	middleware.SetRevokeStore(tokenrevoke.NewStore())
 	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -62,6 +65,27 @@ func TestAgentAuthAcceptsCaseInsensitiveBearer(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected lowercase bearer to pass, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAgentAuthFailsClosedWithoutTaskTokenRevocationStore(t *testing.T) {
+	token, err := tasktoken.Generate(testTaskTokenSecret, "sample-uuid", "agent-1", time.Hour)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+
+	middleware := NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	handler := middleware.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("task token must not be accepted without a revocation store")
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/progress", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected revocation store failure, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

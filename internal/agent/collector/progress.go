@@ -101,6 +101,10 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		}
 
 		uuidDir := filepath.Join(dir, uuid)
+		info, err := os.Lstat(uuidDir)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
 
 		// Check if _LAST symlink exists
 		lastSymlink := filepath.Join(uuidDir, "_LAST")
@@ -411,9 +415,12 @@ func readRegularFileWithin(root, candidate string, maxBytes int64) ([]byte, erro
 }
 
 func readRegularFile(path string, maxBytes int64) ([]byte, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to follow symlink: %s", path)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a regular file: %s", path)
@@ -422,7 +429,7 @@ func readRegularFile(path string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("file too large: %s", path)
 	}
 
-	f, err := os.Open(path)
+	f, err := pathsafe.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

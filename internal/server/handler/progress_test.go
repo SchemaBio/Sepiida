@@ -14,6 +14,7 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
+	"github.com/SchemaBio/Sepiida/internal/common/tokenrevoke"
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
 )
@@ -284,8 +285,9 @@ func TestHandleProgressPopulatesAgentIDFromTaskToken(t *testing.T) {
 	fake := &listLimitDB{}
 	svc := service.NewWorkflowService(fake)
 	progressHandler := NewProgressHandler(svc)
-	authenticated := middleware.NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false).
-		Middleware(http.HandlerFunc(progressHandler.HandleProgress))
+	agentAuth := middleware.NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	agentAuth.SetRevokeStore(tokenrevoke.NewStore())
+	authenticated := agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress))
 
 	payload := model.WorkflowProgress{
 		UUID: testUUID,
@@ -323,8 +325,9 @@ func TestHandleProgressRejectsTaskTokenWorkflowMismatch(t *testing.T) {
 	fake := &listLimitDB{}
 	svc := service.NewWorkflowService(fake)
 	progressHandler := NewProgressHandler(svc)
-	authenticated := middleware.NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false).
-		Middleware(http.HandlerFunc(progressHandler.HandleProgress))
+	agentAuth := middleware.NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing.txt")), testTaskTokenSecret, false)
+	agentAuth.SetRevokeStore(tokenrevoke.NewStore())
+	authenticated := agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress))
 
 	payload := model.WorkflowProgress{
 		UUID:    testUUID,

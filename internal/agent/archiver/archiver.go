@@ -27,6 +27,7 @@ const (
 	maxArchiveManifestBytes = 10 << 20 // workflow inputs/outputs JSON manifests
 	maxNestedJSONBytes      = 1 << 20  // nested JSON references inside outputs
 	maxJSONResolveDepth     = 32
+	maxArchiveObjectBytes   = 20 << 30 // 20 GiB per archived object
 )
 
 var archivePrefixPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$`)
@@ -368,15 +369,21 @@ func (a *Archiver) ArchiveWorkflowWithPrefix(ctx context.Context, uuid string, w
 
 // archiveFileByKey uploads a local file to a specific archive key.
 func (a *Archiver) archiveFileByKey(ctx context.Context, key string, filePath string) error {
-	info, err := os.Stat(filePath)
+	info, err := os.Lstat(filePath)
 	if err != nil {
 		return fmt.Errorf("file not found: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to follow symlink: %s", filePath)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("not a regular file: %s", filePath)
 	}
+	if info.Size() > maxArchiveObjectBytes {
+		return fmt.Errorf("archive object exceeds %d bytes: %s", maxArchiveObjectBytes, filePath)
+	}
 
-	f, err := os.Open(filePath)
+	f, err := pathsafe.OpenRegular(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
@@ -663,9 +670,12 @@ func (a *Archiver) archiveFile(ctx context.Context, uuid string, executionDir st
 }
 
 func readRegularFile(path string, maxBytes int64) ([]byte, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to follow symlink: %s", path)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("not a regular file: %s", path)
@@ -674,7 +684,7 @@ func readRegularFile(path string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("file too large: %s", path)
 	}
 
-	f, err := os.Open(path)
+	f, err := pathsafe.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

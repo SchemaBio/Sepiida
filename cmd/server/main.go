@@ -19,6 +19,7 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/common/apikey"
 	"github.com/SchemaBio/Sepiida/internal/common/db"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
+	"github.com/SchemaBio/Sepiida/internal/common/tokenrevoke"
 	"github.com/SchemaBio/Sepiida/internal/server/handler"
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
 	"github.com/SchemaBio/Sepiida/internal/server/service"
@@ -116,17 +117,24 @@ func main() {
 
 	// Create authentication middleware
 	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret, *authMode == "static")
+	revokeStore := tokenrevoke.NewStore()
+	revokeStore.SetPersistence(databaseObj)
+	agentAuth.SetRevokeStore(revokeStore)
 	queryAuth := middleware.NewQueryAuthMiddleware(mkm.GetQueryKeyManager())
+	revokeHandler := handler.NewTokenRevokeHandler(revokeStore, *taskTokenSecret)
 
 	// Setup routes
 	router := http.NewServeMux()
 
 	// Agent API routes (push data) - use agent auth
-	router.Handle("/api/v1/progress", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleProgress)))
-	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleOutput)))
+	serviceCallbackLimit := newIPRateLimiter(parsePositiveIntEnv("SEPIIDA_SERVICE_CALLBACK_RATE_LIMIT_PER_MINUTE", 600), time.Minute)
+	nodeCallbackLimit := newTokenRateLimiter(parsePositiveIntEnv("SEPIIDA_NODE_CALLBACK_RATE_LIMIT_PER_MINUTE", 60), time.Minute)
+	router.Handle("/api/v1/progress", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleProgress))))
+	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleOutput))))
+	router.Handle("/api/v1/task-tokens/revoke", serviceCallbackLimit.Middleware(revokeHandler))
 
 	// Archive notification - agent auth (agent reports archive completion)
-	router.Handle("/api/v1/workflow/archive", agentAuth.Middleware(http.HandlerFunc(progressHandler.HandleArchive)))
+	router.Handle("/api/v1/workflow/archive", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleArchive))))
 
 	// Query API routes - use query auth
 	router.Handle("/api/v1/workflow", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow)))

@@ -2,8 +2,10 @@ package tasktoken
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +19,19 @@ const MinSecretBytes = 32
 type Claims struct {
 	UUID       string `json:"uuid"`
 	AgentID    string `json:"agent_id"`
+	AttemptID  string `json:"attempt_id,omitempty"`
 	WorkflowID string `json:"workflow_id,omitempty"`
+	JTI        string `json:"jti,omitempty"`
 	Exp        int64  `json:"exp"`
 }
 
 func Generate(secret, uuid, agentID string, ttl time.Duration) (string, error) {
-	return GenerateForWorkflow(secret, uuid, agentID, "", ttl)
+	return GenerateForAttempt(secret, uuid, agentID, "", "", ttl)
 }
-
 func GenerateForWorkflow(secret, uuid, agentID, workflowID string, ttl time.Duration) (string, error) {
+	return GenerateForAttempt(secret, uuid, agentID, "", workflowID, ttl)
+}
+func GenerateForAttempt(secret, uuid, agentID, attemptID, workflowID string, ttl time.Duration) (string, error) {
 	if err := validateSecret(secret); err != nil {
 		return "", err
 	}
@@ -35,21 +41,21 @@ func GenerateForWorkflow(secret, uuid, agentID, workflowID string, ttl time.Dura
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	claims := Claims{
-		UUID:       uuid,
-		AgentID:    agentID,
-		WorkflowID: workflowID,
-		Exp:        time.Now().Add(ttl).Unix(),
+	if attemptID == "" {
+		attemptID = agentID
 	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	claims := Claims{UUID: uuid, AgentID: agentID, AttemptID: attemptID, WorkflowID: workflowID, JTI: hex.EncodeToString(buf), Exp: time.Now().Add(ttl).Unix()}
 	payload, err := json.Marshal(claims)
 	if err != nil {
 		return "", err
 	}
-	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
-	signature := sign(secret, encodedPayload)
-	return prefix + "." + encodedPayload + "." + signature, nil
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	return prefix + "." + encoded + "." + sign(secret, encoded), nil
 }
-
 func Validate(secret, token string) (*Claims, error) {
 	if err := validateSecret(secret); err != nil {
 		return nil, err
@@ -58,8 +64,7 @@ func Validate(secret, token string) (*Claims, error) {
 	if len(parts) != 3 || parts[0] != prefix {
 		return nil, errors.New("invalid task token format")
 	}
-	expected := sign(secret, parts[1])
-	if !hmac.Equal([]byte(expected), []byte(parts[2])) {
+	if !hmac.Equal([]byte(sign(secret, parts[1])), []byte(parts[2])) {
 		return nil, errors.New("invalid task token signature")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
@@ -76,13 +81,12 @@ func Validate(secret, token string) (*Claims, error) {
 	if claims.Exp <= time.Now().Unix() {
 		return nil, errors.New("task token expired")
 	}
+	if claims.AttemptID == "" {
+		claims.AttemptID = claims.AgentID
+	}
 	return &claims, nil
 }
-
-func LooksLike(token string) bool {
-	return strings.HasPrefix(token, prefix+".")
-}
-
+func LooksLike(token string) bool { return strings.HasPrefix(token, prefix+".") }
 func validateSecret(secret string) error {
 	if secret == "" {
 		return errors.New("task token secret is required")
@@ -90,33 +94,16 @@ func validateSecret(secret string) error {
 	if len(secret) < MinSecretBytes {
 		return fmt.Errorf("task token secret must be at least %d bytes", MinSecretBytes)
 	}
-	if looksLikePlaceholderSecret(secret) {
-		return errors.New("task token secret appears to be a placeholder; use a long random secret")
+	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(secret)))
+	for _, marker := range []string{"changeme", "changeit", "replacewith", "example", "placeholder", "yourrandomsecret", "longrandomsharedsecret"} {
+		if strings.Contains(normalized, marker) {
+			return errors.New("task token secret appears to be a placeholder; use a long random secret")
+		}
 	}
 	return nil
 }
-
-func sign(secret, encodedPayload string) string {
+func sign(secret, payload string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(encodedPayload))
+	mac.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func looksLikePlaceholderSecret(secret string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(secret))
-	normalized = strings.NewReplacer("-", "", "_", "", " ", "").Replace(normalized)
-	for _, marker := range []string{
-		"changeme",
-		"changeit",
-		"replacewith",
-		"example",
-		"placeholder",
-		"yourrandomsecret",
-		"longrandomsharedsecret",
-	} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
 }
