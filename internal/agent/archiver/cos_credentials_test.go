@@ -80,3 +80,22 @@ func TestCOSCredentialsRenewalDoesNotReuseExpiredSession(t *testing.T) {
 		t.Fatalf("expected one renewal after expiry, got %d", renewals)
 	}
 }
+
+func TestCOSCredentialsIncludesNodeSecret(t *testing.T) {
+	var gotHeader string
+	credentials := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("x-node-secret")
+		fmt.Fprintf(w, `{"secret_id":"temporary-id","secret_key":"temporary-key","session_token":"session-1","expires_at":%d}`, time.Now().Add(30*time.Minute).Unix())
+	}))
+	defer credentials.Close()
+
+	transport := &renewableCOSTransport{
+		endpoint:   credentials.URL,
+		token:      "task-token",
+		nodeSecret: "nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=",
+	}
+	_, _ = transport.RoundTrip(httptest.NewRequest(http.MethodGet, "http://object.invalid/result", nil))
+	if gotHeader != "nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=" {
+		t.Fatalf("expected x-node-secret to be %q, got %q", "nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=", gotHeader)
+	}
+}

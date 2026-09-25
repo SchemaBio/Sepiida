@@ -24,6 +24,7 @@ type HTTPSender struct {
 	agentID         string
 	taskToken       string
 	taskTokenSecret string
+	nodeSecret      string
 	client          *http.Client
 }
 
@@ -53,6 +54,16 @@ func NewHTTPSenderWithTaskCredential(serverURL, apiKey, agentID, taskToken, task
 	s.taskToken = strings.TrimSpace(taskToken)
 	s.taskTokenSecret = taskTokenSecret
 	return s
+}
+
+// SetNodeSecret configures an edge bypass secret sent via the x-node-secret header.
+func (s *HTTPSender) SetNodeSecret(secret string) {
+	s.nodeSecret = strings.TrimSpace(secret)
+}
+
+// NodeSecret returns the configured edge bypass secret.
+func (s *HTTPSender) NodeSecret() string {
+	return s.nodeSecret
 }
 
 // SendProgress sends workflow progress to server
@@ -174,6 +185,9 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 }
 
 func (s *HTTPSender) authorize(req *http.Request, uuid string, workflowID string) error {
+	if s.nodeSecret != "" {
+		req.Header.Set("x-node-secret", s.nodeSecret)
+	}
 	token := s.apiKey
 	if s.taskToken != "" {
 		token = s.taskToken

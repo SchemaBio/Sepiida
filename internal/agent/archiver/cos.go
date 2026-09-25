@@ -99,7 +99,11 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 		if token == "" {
 			return nil, fmt.Errorf("task token required for credential renewal")
 		}
-		transport = &renewableCOSTransport{endpoint: endpoint, token: token}
+		nodeSecret := strings.TrimSpace(os.Getenv("SEPIIDA_NODE_SECRET"))
+		if nodeSecret == "" {
+			nodeSecret = strings.TrimSpace(os.Getenv("CVM_NODE_SECRET"))
+		}
+		transport = &renewableCOSTransport{endpoint: endpoint, token: token, nodeSecret: nodeSecret}
 	} else if accessKeyID != "" && secretAccessKey != "" {
 		transport = &cos.AuthorizationTransport{
 			SecretID:     accessKeyID,

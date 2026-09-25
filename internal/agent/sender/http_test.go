@@ -179,6 +179,28 @@ func TestSendOutputTruncatesLargeServerErrorBody(t *testing.T) {
 	}
 }
 
+func TestSendProgressIncludesNodeSecret(t *testing.T) {
+	var gotNodeSecret string
+	sender := NewHTTPSender("http://sepiida.test", "static-key", "agent-1")
+	sender.SetNodeSecret("nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=")
+	sender.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotNodeSecret = r.Header.Get("x-node-secret")
+		return testResponse(http.StatusOK, ""), nil
+	})}
+
+	err := sender.SendProgress(&model.WorkflowProgress{
+		AgentID:  "agent-1",
+		UUID:     "sample-uuid",
+		Workflow: model.Workflow{ID: "run-1"},
+	})
+	if err != nil {
+		t.Fatalf("SendProgress failed: %v", err)
+	}
+	if gotNodeSecret != "nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=" {
+		t.Fatalf("expected x-node-secret header to match, got: %q", gotNodeSecret)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {

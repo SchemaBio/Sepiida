@@ -49,6 +49,7 @@ func main() {
 	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
 	archivePrefix := flag.String("archive-prefix", os.Getenv("SEPIIDA_ARCHIVE_PREFIX"), "object-storage prefix for this execution attempt (standard UUID); env: SEPIIDA_ARCHIVE_PREFIX")
 	taskToken := flag.String("task-token", os.Getenv("SEPIIDA_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
+	nodeSecret := flag.String("node-secret", firstNonEmptyEnv("SEPIIDA_NODE_SECRET", "CVM_NODE_SECRET"), "secret header for Cloudflare/edge bypass; env: SEPIIDA_NODE_SECRET")
 	flag.Parse()
 
 	// Parse watch directories
@@ -87,11 +88,17 @@ func main() {
 	} else {
 		log.Printf("Authentication: static agent key")
 	}
+	if strings.TrimSpace(*nodeSecret) != "" {
+		log.Printf("Edge Node Secret: configured")
+	}
 
 	// Create components
 	logParser := parser.NewLogParser()
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
 	httpSender := sender.NewHTTPSenderWithTaskCredential(*serverURL, *apiKey, *agentID, *taskToken, "")
+	if strings.TrimSpace(*nodeSecret) != "" {
+		httpSender.SetNodeSecret(*nodeSecret)
+	}
 
 	// Create archiver if archive path is specified
 	var arch *archiver.Archiver

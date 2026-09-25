@@ -15,6 +15,7 @@ import (
 // archive can outlive an STS session without restarting the agent.
 type renewableCOSTransport struct {
 	endpoint, token string
+	nodeSecret      string
 	mu              sync.Mutex
 	transport       *cos.AuthorizationTransport
 	expires         time.Time
@@ -29,6 +30,9 @@ func (t *renewableCOSTransport) RoundTrip(request *http.Request) (*http.Response
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+t.token)
+		if t.nodeSecret != "" {
+			req.Header.Set("x-node-secret", t.nodeSecret)
+		}
 		client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 		resp, err := client.Do(req)
 		if err != nil {
