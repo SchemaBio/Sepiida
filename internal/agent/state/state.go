@@ -199,8 +199,10 @@ func (s *StateManager) HasStateChanged(uuidDir string, uuid string, executionDir
 
 	// Check if log file has been modified
 	if logFileInfo != nil {
+		// JSON state reloads can change a time's Location representation.
+		// Compare instants so unchanged logs do not trigger another push.
 		if logFileInfo.Size() != prevState.LogFileSize ||
-			logFileInfo.ModTime() != prevState.LogFileModTime {
+			!logFileInfo.ModTime().Equal(prevState.LogFileModTime) {
 			// Log file changed, need to push
 			return true, s.newState(prevState, uuid, executionDir, workflow, tasks, logFileInfo)
 		}

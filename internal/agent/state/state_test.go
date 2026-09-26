@@ -4,9 +4,65 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
+
+func TestHasStateChangedComparesLogModificationInstantAfterReload(t *testing.T) {
+	for _, zone := range []struct {
+		name   string
+		offset int
+	}{{"UTC", 0}, {"UTC+8", 8 * 60 * 60}} {
+		t.Run(zone.name, func(t *testing.T) {
+			dir := t.TempDir()
+			logPath := filepath.Join(dir, "workflow.log")
+			mustWriteStateTestFile(t, logPath, "workflow log")
+			info := mustStatStateTestFile(t, logPath)
+			// File metadata can carry a different Location from the same
+			// timestamp restored from JSON, including Local versus UTC on Linux.
+			mtime := time.Date(2026, 9, 26, 7, 0, 0, 123456789, time.FixedZone(zone.name, zone.offset))
+			executionDir := filepath.Join(dir, "run-1")
+			workflow := &model.Workflow{ID: "run-1", Status: model.WorkflowStatusSuccess}
+			manager := NewStateManager()
+			if err := manager.SaveState(dir, &WorkflowState{
+				UUID: "sample-uuid", WorkflowID: workflow.ID, WorkflowStatus: workflow.Status,
+				ExecutionDir: executionDir, OutputsPushed: true, Archived: true,
+				LogFileSize: info.Size(), LogFileModTime: mtime,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			manager = NewStateManager() // Also covers an Agent restart.
+			for _, tc := range []struct {
+				name    string
+				delta   time.Duration
+				changed bool
+			}{
+				{"unchanged", 0, false},
+				{"newer at same size", time.Nanosecond, true},
+				{"older at same size", -time.Nanosecond, true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					logInfo := stateTestLogInfo{FileInfo: info, mtime: mtime.Add(tc.delta)}
+					changed, next := manager.HasStateChanged(dir, "sample-uuid", executionDir, workflow, nil, logInfo, true)
+					if changed != tc.changed {
+						t.Fatalf("log changed=%v, want %v after JSON state reload", changed, tc.changed)
+					}
+					if !next.OutputsPushed || !next.Archived {
+						t.Fatal("same execution lost its acknowledged output/archive flags")
+					}
+				})
+			}
+		})
+	}
+}
+
+type stateTestLogInfo struct {
+	os.FileInfo
+	mtime time.Time
+}
+
+func (i stateTestLogInfo) ModTime() time.Time { return i.mtime }
 
 func TestHasStateChangedResetsIdempotencyFlagsForNewExecution(t *testing.T) {
 	dir := t.TempDir()
