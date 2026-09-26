@@ -62,6 +62,12 @@ func NewArchiver(backend Backend) *Archiver {
 //   - https://<bucket>.cos.<region>.myqcloud.com/prefix → COSBackend (Tencent Cloud COS)
 //   - http(s)://host:port/bucket/prefix → S3Backend (MinIO)
 func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string) (*Archiver, error) {
+	return NewFromPathWithNodeCredentials(archivePath, accessKeyID, secretAccessKey, NodeCredentialsFromEnv())
+}
+
+// NewFromPathWithNodeCredentials uses the agent's resolved node credentials,
+// including command-line overrides, for COS credential renewal.
+func NewFromPathWithNodeCredentials(archivePath string, accessKeyID string, secretAccessKey string, credentials NodeCredentials) (*Archiver, error) {
 	var backend Backend
 	var err error
 
@@ -71,7 +77,7 @@ func NewFromPath(archivePath string, accessKeyID string, secretAccessKey string)
 	archivePath = normalizeArchiveURLScheme(archivePath)
 
 	if isCOSURL(archivePath) {
-		backend, err = NewCOSBackend(archivePath, accessKeyID, secretAccessKey)
+		backend, err = NewCOSBackendWithNodeCredentials(archivePath, accessKeyID, secretAccessKey, credentials)
 	} else if isOSSURL(archivePath) {
 		backend, err = NewOSSBackend(archivePath, accessKeyID, secretAccessKey)
 	} else if isS3URL(archivePath) {

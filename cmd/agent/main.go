@@ -38,6 +38,7 @@ type workflowArchiver interface {
 
 func main() {
 	// Command line flags
+	showVersion := flag.Bool("version", false, "print agent build version and exit")
 	serverURL := flag.String("s", defaultServerURL(), "server URL; env: SEPIIDA_SERVER_URL")
 	apiKey := flag.String("key", os.Getenv("SEPIIDA_AGENT_KEY"), "API key for authentication; env: SEPIIDA_AGENT_KEY")
 	agentID := flag.String("id", firstNonEmptyEnv("SEPIIDA_AGENT_ID", "HOSTNAME"), "agent identifier; env: SEPIIDA_AGENT_ID")
@@ -51,6 +52,10 @@ func main() {
 	taskToken := flag.String("task-token", os.Getenv("SEPIIDA_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
 	nodeSecret := flag.String("node-secret", firstNonEmptyEnv("SEPIIDA_NODE_SECRET", "CVM_NODE_SECRET"), "secret header for Cloudflare/edge bypass; env: SEPIIDA_NODE_SECRET")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(agentVersion())
+		return
+	}
 
 	// Parse watch directories
 	dirs := parseWatchDirs(*watchDirs)
@@ -79,7 +84,7 @@ func main() {
 	// Parse poll interval
 	pollInterval := time.Duration(*interval) * time.Second
 
-	log.Printf("Starting Sepiida Agent: %s", *agentID)
+	log.Printf("Starting Sepiida Agent: %s (%s)", *agentID, agentVersion())
 	log.Printf("Server URL: %s", redactURLForLog(*serverURL))
 	log.Printf("Poll Interval: %v", pollInterval)
 	log.Printf("Watch Dirs: %v", dirs)
@@ -104,7 +109,10 @@ func main() {
 	var arch *archiver.Archiver
 	if *archivePath != "" {
 		var err error
-		arch, err = archiver.NewFromPath(*archivePath, *archiveKeyID, *archiveKeySecret)
+		nodeCredentials := archiver.NodeCredentialsFromEnv()
+		nodeCredentials.TaskToken = *taskToken
+		nodeCredentials.NodeSecret = *nodeSecret
+		arch, err = archiver.NewFromPathWithNodeCredentials(*archivePath, *archiveKeyID, *archiveKeySecret, nodeCredentials)
 		if err != nil {
 			log.Fatalf("Failed to initialize archiver: %v", err)
 		}

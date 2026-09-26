@@ -85,6 +85,8 @@ make build
 
 ### 3. 准备Key文件
 
+计算节点镜像中的 Agent 安装方法见下方「CVM 镜像安装」。
+
 创建两个Key文件：
 
 ```bash
@@ -166,6 +168,9 @@ SaaS `task-token` 的撤销记录持久化在 Sepiida PostgreSQL 的
 |------|------|--------|
 | `-s` | Server URL | http://localhost:9090 |
 | `-key` | API Key（需在agent-keys.txt中） | （需指定） |
+| `-task-token` | Squid 签发的任务令牌，与 `-key` 二选一 | `SEPIIDA_TASK_TOKEN` |
+| `-node-secret` | Cloudflare 规则匹配的 `x-node-secret` 请求头；同时用于回调和 COS 临时凭据续期 | `SEPIIDA_NODE_SECRET`，回退到 `CVM_NODE_SECRET` |
+| `-version` | 输出构建提交、工作区修改标记、Go 版本和目标平台后退出，无需令牌 | — |
 | `-id` | Agent ID | agent-001 |
 | `-i` | 推送间隔（秒） | 60 |
 | `-w` | 监控目录（UUID目录的父目录） | ./output |
@@ -173,6 +178,35 @@ SaaS `task-token` 的撤销记录持久化在 Sepiida PostgreSQL 的
 | `-archive-prefix` | 当前执行尝试的对象存储前缀（标准 UUID）；为空时使用监控目录 UUID | （使用 UUID） |
 | `-archive-key-id` | 对象存储 Access Key ID（覆盖环境变量） | （读取环境变量） |
 | `-archive-key-secret` | 对象存储 Secret Access Key（覆盖环境变量） | （读取环境变量） |
+
+#### CVM 镜像安装
+
+在源码目录执行 `make build-agent-linux`，生成不依赖动态 C 运行库的 Linux amd64 Agent。
+Windows PowerShell 可执行 `./scripts/build-agent.ps1`；ARM64 镜像使用
+`./scripts/build-agent.ps1 -Architecture arm64`。产物和校验文件位于 `bin/`。
+
+将 `sepiida-agent-linux-amd64` 和对应的 `.sha256` 文件传到镜像制作节点后执行：
+
+```bash
+sha256sum -c sepiida-agent-linux-amd64.sha256
+sudo install -m 0755 sepiida-agent-linux-amd64 /usr/local/bin/sepiida-agent
+/usr/local/bin/sepiida-agent --version
+command -v sepiida-agent
+```
+
+Agent 由 Squid 生成的 UserData 启动。镜像中只安装程序，不保存任务令牌、
+节点密钥、COS 临时凭据或运行中的任务状态。`--version` 的 `modified=true`
+表示二进制构建时包含未提交的修改，不能只凭提交号识别该产物；使用 SHA-256 核对文件。
+
+SaaS 启动时，Squid 注入 `SEPIIDA_TASK_TOKEN`、`SEPIIDA_CREDENTIALS_URL`，
+以及配置了 `CVM_NODE_SECRET` 时的 `SEPIIDA_NODE_SECRET`。任务令牌仍用于应用认证，
+节点密钥用于匹配 Cloudflare 的 API 放行规则。Agent 的进度、输出、归档通知和
+COS 凭据续期使用相同的任务令牌及节点密钥，命令行参数优先于环境变量。
+密钥请求头不会发送到 COS 对象存储。认证请求拒绝跟随重定向，服务器 URL 应直接指向 API。
+
+Cloudflare 需要配置相应规则后才能放行；仅更新 Agent 不会改变边缘规则。
+若请求被拦截，Agent 日志会记录 HTTP 状态码和响应中的 `CF-Ray`，用于查询 Security Events。
+空输出目录下的正常轮询只能验证 Agent 启动，仍需真实工作流验证进度和归档。
 
 ### 6. 对象存储归档（可选）
 

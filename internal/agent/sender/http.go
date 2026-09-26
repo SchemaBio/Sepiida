@@ -34,7 +34,12 @@ func NewHTTPSender(serverURL, apiKey, agentID string) *HTTPSender {
 		serverURL: serverURL,
 		apiKey:    apiKey,
 		agentID:   agentID,
-		client:    &http.Client{Timeout: defaultHTTPTimeout},
+		client: &http.Client{
+			Timeout: defaultHTTPTimeout,
+			// Callbacks must reach the configured API directly. Redirects can
+			// otherwise forward the node secret or turn a POST into a GET.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 
@@ -95,8 +100,7 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, string(respBody))
+		return responseError(resp)
 	}
 
 	return nil
@@ -134,8 +138,7 @@ func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, string(respBody))
+		return responseError(resp)
 	}
 
 	return nil
@@ -177,8 +180,7 @@ func (s *HTTPSender) SendOutput(uuid string, workflowID string, outputsJSON stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody := readErrorBody(resp.Body)
-		return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, string(respBody))
+		return responseError(resp)
 	}
 
 	return nil
@@ -237,6 +239,13 @@ func (s *HTTPSender) endpoint(apiPath string) (string, error) {
 	base.RawQuery = ""
 	base.Fragment = ""
 	return base.String(), nil
+}
+
+func responseError(resp *http.Response) error {
+	if ray := resp.Header.Get("CF-Ray"); ray != "" {
+		return fmt.Errorf("server returned error: %d (CF-Ray=%q) - %s", resp.StatusCode, ray, readErrorBody(resp.Body))
+	}
+	return fmt.Errorf("server returned error: %d - %s", resp.StatusCode, readErrorBody(resp.Body))
 }
 
 func readErrorBody(r io.Reader) []byte {

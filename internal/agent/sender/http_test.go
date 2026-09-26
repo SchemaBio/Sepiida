@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -198,6 +199,75 @@ func TestSendProgressIncludesNodeSecret(t *testing.T) {
 	}
 	if gotNodeSecret != "nJ6RLC6LU2NwmTvEwZOtazUSgzkQ3LOyGa0QcJfjGsg=" {
 		t.Fatalf("expected x-node-secret header to match, got: %q", gotNodeSecret)
+	}
+}
+
+func TestCallbacksKeepTaskTokenAndNodeSecret(t *testing.T) {
+	for _, withSecret := range []bool{false, true} {
+		var paths []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer task-token" {
+				t.Error("callback lost its POST method or task authentication")
+			}
+			wantSecret := ""
+			if withSecret {
+				wantSecret = "test-edge-secret"
+			}
+			if r.Header.Get("x-node-secret") != wantSecret {
+				t.Errorf("incorrect edge secret on %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		s := NewHTTPSenderWithTaskCredential(server.URL, "", "agent", "task-token", "")
+		if withSecret {
+			s.SetNodeSecret("test-edge-secret")
+		}
+		for _, err := range []error{
+			s.SendProgress(&model.WorkflowProgress{UUID: "uuid", Workflow: model.Workflow{ID: "run"}}),
+			s.SendOutput("uuid", "run", "{}"),
+			s.NotifyArchived(&model.ArchiveResult{UUID: "uuid", WorkflowID: "run"}),
+		} {
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		server.Close()
+		if strings.Join(paths, ",") != "/api/v1/progress,/api/v1/workflow/output,/api/v1/workflow/archive" {
+			t.Fatalf("unexpected callbacks: %v", paths)
+		}
+	}
+}
+
+func TestCallbackRedirectDoesNotForwardCredentials(t *testing.T) {
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("callback followed a redirect with node credentials")
+	}))
+	defer destination.Close()
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect} {
+		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, destination.URL, status)
+		}))
+		s := NewHTTPSenderWithTaskCredential(origin.URL, "", "agent", "task-token", "")
+		s.SetNodeSecret("test-edge-secret")
+		err := s.SendOutput("uuid", "run", "{}")
+		origin.Close()
+		if err == nil {
+			t.Fatal("redirect was accepted as a successful callback")
+		}
+	}
+}
+
+func TestCallbackErrorIncludesCloudflareRay(t *testing.T) {
+	s := NewHTTPSender("http://sepiida.test", "static-key", "agent")
+	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp := testResponse(http.StatusForbidden, "blocked")
+		resp.Header.Set("CF-Ray", "diagnostic-ray-FRA")
+		return resp, nil
+	})}
+	err := s.SendOutput("uuid", "run", "{}")
+	if err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "diagnostic-ray-FRA") {
+		t.Fatalf("missing edge diagnostic: %v", err)
 	}
 }
 

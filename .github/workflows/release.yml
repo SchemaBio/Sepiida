@@ -23,6 +23,8 @@ jobs:
   build:
     name: Build binaries
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
     strategy:
       matrix:
         include:
@@ -49,10 +51,14 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
       - name: Download dependencies
-        run: go mod tidy
+        run: go mod download
+
+      - name: Test
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go test ./...
 
       - name: Build Server
         env:
@@ -66,7 +72,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags="-s -w" -o bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} ./cmd/agent
+          go build -trimpath -buildvcs=true -ldflags="-s -w" -o bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} ./cmd/agent
+
+      - name: Checksum Agent
+        working-directory: bin
+        run: sha256sum sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} > sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}.sha256
 
       - name: Upload Server artifact
         uses: actions/upload-artifact@v4
@@ -78,7 +88,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          path: |
+            bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+            bin/sepiida-agent-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}.sha256
 
   release:
     name: Create Release
@@ -149,24 +161,27 @@ jobs:
 
             **Server:**
             ```bash
-            ./sepiida-server -p 8080 -d sqlite://data/sepiida.db \
+            ./sepiida-server-linux-amd64 -p 9090 -d "$DATABASE_URL" \
                 -agent-key agent-keys.txt \
-                -query-key query-keys.txt
+                -query-key query-keys.txt -auth-mode static
             ```
 
             **Agent:**
             ```bash
-            ./sepiida-agent -s http://server:8080 -key agent-key-001 -w /mnt/data/output
+            sha256sum -c sepiida-agent-linux-amd64.sha256
+            sudo install -m 0755 sepiida-agent-linux-amd64 /usr/local/bin/sepiida-agent
+            sepiida-agent --version
+            sepiida-agent -s http://server:9090 -key agent-key-001 -w /mnt/data/output
             ```
 
             **Query:**
             ```bash
             curl -H "Authorization: Bearer query-key-001" \
-                "http://server:8080/api/v1/workflow?uuid=xxx"
+                "http://server:9090/api/v1/workflow?uuid=xxx"
 
             # Force reload keys (requires query key)
             curl -X POST -H "Authorization: Bearer query-key-001" \
-                "http://server:8080/api/v1/keys/reload"
+                "http://server:9090/api/v1/keys/reload"
             ```
           files: release/*
           draft: false

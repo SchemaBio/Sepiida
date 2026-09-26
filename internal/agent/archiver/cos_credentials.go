@@ -5,11 +5,33 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
+
+// NodeCredentials identifies a compute attempt to the credential API. It does
+// not contain the server's token signing key or permanent COS credentials.
+type NodeCredentials struct {
+	Endpoint   string
+	TaskToken  string
+	NodeSecret string
+}
+
+func NodeCredentialsFromEnv() NodeCredentials {
+	secret := strings.TrimSpace(os.Getenv("SEPIIDA_NODE_SECRET"))
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv("CVM_NODE_SECRET"))
+	}
+	return NodeCredentials{
+		Endpoint:   strings.TrimSpace(os.Getenv("SEPIIDA_CREDENTIALS_URL")),
+		TaskToken:  strings.TrimSpace(os.Getenv("SEPIIDA_TASK_TOKEN")),
+		NodeSecret: secret,
+	}
+}
 
 // renewableCOSTransport refreshes credentials between requests, so a multipart
 // archive can outlive an STS session without restarting the agent.
@@ -39,6 +61,11 @@ func (t *renewableCOSTransport) RoundTrip(request *http.Request) (*http.Response
 			t.mu.Unlock()
 			return nil, fmt.Errorf("credential renewal unavailable")
 		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			t.mu.Unlock()
+			return nil, fmt.Errorf("invalid temporary credential response: HTTP %d (CF-Ray=%q)", resp.StatusCode, resp.Header.Get("CF-Ray"))
+		}
 		var data struct {
 			SecretID     string `json:"secret_id"`
 			SecretKey    string `json:"secret_key"`
@@ -47,7 +74,7 @@ func (t *renewableCOSTransport) RoundTrip(request *http.Request) (*http.Response
 		}
 		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16384)).Decode(&data)
 		resp.Body.Close()
-		if resp.StatusCode != 200 || decodeErr != nil || data.SecretID == "" || data.SecretKey == "" || data.SessionToken == "" || data.Expires <= time.Now().Unix() {
+		if decodeErr != nil || data.SecretID == "" || data.SecretKey == "" || data.SessionToken == "" || data.Expires <= time.Now().Unix() {
 			t.mu.Unlock()
 			return nil, fmt.Errorf("invalid temporary credential response")
 		}

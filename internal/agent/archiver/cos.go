@@ -28,6 +28,12 @@ type COSBackend struct {
 //	cos://<region>/<bucket>[/prefix]
 //	https://<bucket>.cos.<region>.myqcloud.com[/prefix]
 func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*COSBackend, error) {
+	return NewCOSBackendWithNodeCredentials(rawURL, accessKeyID, secretAccessKey, NodeCredentialsFromEnv())
+}
+
+// NewCOSBackendWithNodeCredentials accepts the same resolved credentials used
+// by the progress sender instead of independently re-reading CLI defaults.
+func NewCOSBackendWithNodeCredentials(rawURL string, accessKeyID string, secretAccessKey string, credentials NodeCredentials) (*COSBackend, error) {
 	var bucket, region, prefix string
 
 	if strings.HasPrefix(rawURL, "cos://") {
@@ -90,19 +96,16 @@ func NewCOSBackend(rawURL string, accessKeyID string, secretAccessKey string) (*
 
 	// Build transport with credentials
 	var transport http.RoundTripper
-	if endpoint := os.Getenv("SEPIIDA_CREDENTIALS_URL"); endpoint != "" {
+	if endpoint := strings.TrimSpace(credentials.Endpoint); endpoint != "" {
 		u, err := url.Parse(endpoint)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" {
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return nil, fmt.Errorf("credential endpoint must be an HTTPS URL")
 		}
-		token := os.Getenv("SEPIIDA_TASK_TOKEN")
+		token := strings.TrimSpace(credentials.TaskToken)
 		if token == "" {
 			return nil, fmt.Errorf("task token required for credential renewal")
 		}
-		nodeSecret := strings.TrimSpace(os.Getenv("SEPIIDA_NODE_SECRET"))
-		if nodeSecret == "" {
-			nodeSecret = strings.TrimSpace(os.Getenv("CVM_NODE_SECRET"))
-		}
+		nodeSecret := strings.TrimSpace(credentials.NodeSecret)
 		transport = &renewableCOSTransport{endpoint: endpoint, token: token, nodeSecret: nodeSecret}
 	} else if accessKeyID != "" && secretAccessKey != "" {
 		transport = &cos.AuthorizationTransport{

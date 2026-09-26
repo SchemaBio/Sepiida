@@ -160,12 +160,46 @@ Self-hosted deployments use `static` mode. SaaS deployments use
 | --- | --- | --- |
 | `-s` | Server URL | `http://localhost:9090` |
 | `-key` | API key listed in `agent-keys.txt` | Required in static mode |
+| `-task-token` | Task credential issued by Squid; mutually exclusive with `-key` | `SEPIIDA_TASK_TOKEN` |
+| `-node-secret` | `x-node-secret` header for configured Cloudflare rules, used by callbacks and COS credential renewal | `SEPIIDA_NODE_SECRET`, then `CVM_NODE_SECRET` |
+| `-version` | Print revision, dirty status, Go version and target platform, then exit without authentication | — |
 | `-id` | Agent ID | `agent-001` |
 | `-i` | Push interval in seconds | `60` |
 | `-w` | Parent directory containing UUID directories | `./output` |
 | `-archive` | Object storage or local archive destination | Disabled |
 | `-archive-key-id` | Storage access key ID; overrides environment variables | Read from the environment |
 | `-archive-key-secret` | Storage secret key; overrides environment variables | Read from the environment |
+
+#### Install the Agent in a CVM image
+
+Run `make build-agent-linux` to build a Linux amd64 binary without a dynamic C
+runtime dependency. On Windows, run `./scripts/build-agent.ps1` in PowerShell;
+use `-Architecture arm64` for an ARM64 image. Copy the binary and its `.sha256`
+file from `bin/` to the image preparation node, then run:
+
+```bash
+sha256sum -c sepiida-agent-linux-amd64.sha256
+sudo install -m 0755 sepiida-agent-linux-amd64 /usr/local/bin/sepiida-agent
+/usr/local/bin/sepiida-agent --version
+command -v sepiida-agent
+```
+
+Squid UserData starts the Agent and supplies task credentials at runtime. Store
+only the executable in the image; do not bake task tokens, node secrets, COS
+sessions or workflow state into it. A `modified=true` build contains uncommitted
+changes, so use its SHA-256 checksum to identify the exact artifact.
+
+Squid supplies `SEPIIDA_TASK_TOKEN`, `SEPIIDA_CREDENTIALS_URL`, and
+`SEPIIDA_NODE_SECRET` when `CVM_NODE_SECRET` is configured. Progress, output,
+archive notifications and COS credential renewal share the resolved task token
+and node secret, with CLI flags taking precedence over environment variables.
+The node secret is not sent to COS object storage. Authenticated API requests
+reject redirects; configure the direct API URL.
+
+Cloudflare must have matching API rules configured separately. The task token
+still authenticates each application request. Errors include the HTTP status and
+`CF-Ray` response header for Security Events lookup. Empty-directory polling
+only verifies Agent startup; workflow progress and archival still need a real run.
 
 ### 6. Archive Workflow Outputs
 
