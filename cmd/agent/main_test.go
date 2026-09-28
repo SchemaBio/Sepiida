@@ -145,7 +145,7 @@ func TestRunCollectionRetriesArchiveNotificationWithoutReupload(t *testing.T) {
 	senderFake := &archiveRetrySender{notifyErrors: 1}
 	archiverFake := &archiveRetryArchiver{}
 
-	runCollection(collectorFake, senderFake, archiverFake, time.Second, "attempt-1")
+	runCollection(collectorFake, senderFake, archiverFake, time.Second, "attempt-1", nil)
 	if archiverFake.calls != 1 {
 		t.Fatalf("first collection uploaded %d times, want 1", archiverFake.calls)
 	}
@@ -156,7 +156,7 @@ func TestRunCollectionRetriesArchiveNotificationWithoutReupload(t *testing.T) {
 		t.Fatal("successful upload was not persisted in local state")
 	}
 
-	runCollection(collectorFake, senderFake, archiverFake, time.Second, "attempt-1")
+	runCollection(collectorFake, senderFake, archiverFake, time.Second, "attempt-1", nil)
 	if archiverFake.calls != 1 {
 		t.Fatalf("retry re-uploaded archive %d times, want 1", archiverFake.calls)
 	}
@@ -166,6 +166,38 @@ func TestRunCollectionRetriesArchiveNotificationWithoutReupload(t *testing.T) {
 	if collectorFake.markArchivedCalls != 1 || !workflowState.Archived {
 		t.Fatalf("archive was not marked after callback success: calls=%d state=%+v", collectorFake.markArchivedCalls, workflowState)
 	}
+}
+
+func TestRunCollectionSendsHeartbeatWithoutProgressChangesAndOnCollectionError(t *testing.T) {
+	heartbeat := &model.AgentHeartbeat{UUID: "task-uuid", AgentID: "attempt-1", AgentVersion: "test", CollectionIntervalSeconds: 15}
+	collectorFake := &cycleCollector{}
+	senderFake := &heartbeatCaptureSender{}
+	runCollection(collectorFake, senderFake, nil, time.Second, "attempt-1", heartbeat)
+	if len(senderFake.heartbeats) != 1 || senderFake.heartbeats[0].CollectionStatus != "ok" {
+		t.Fatalf("empty progress cycle should still send an ok heartbeat: %+v", senderFake.heartbeats)
+	}
+	collectorFake.err = context.DeadlineExceeded
+	runCollection(collectorFake, senderFake, nil, time.Second, "attempt-1", heartbeat)
+	if len(senderFake.heartbeats) != 2 || senderFake.heartbeats[1].CollectionStatus != "error" || senderFake.heartbeats[1].ErrorCode != "collection_failed" {
+		t.Fatalf("failed collection should send a bounded error heartbeat: %+v", senderFake.heartbeats)
+	}
+}
+
+type cycleCollector struct{ err error }
+
+func (f *cycleCollector) Collect() ([]collector.CollectResult, error)     { return nil, f.err }
+func (f *cycleCollector) SaveState(string, *statepkg.WorkflowState) error { return nil }
+func (f *cycleCollector) MarkOutputsPushed(string) error                  { return nil }
+func (f *cycleCollector) MarkArchived(string) error                       { return nil }
+
+type heartbeatCaptureSender struct{ heartbeats []model.AgentHeartbeat }
+
+func (f *heartbeatCaptureSender) SendProgress(*model.WorkflowProgress) error { return nil }
+func (f *heartbeatCaptureSender) SendOutput(string, string, string) error    { return nil }
+func (f *heartbeatCaptureSender) NotifyArchived(*model.ArchiveResult) error  { return nil }
+func (f *heartbeatCaptureSender) SendHeartbeat(heartbeat *model.AgentHeartbeat) error {
+	f.heartbeats = append(f.heartbeats, *heartbeat)
+	return nil
 }
 
 type archiveRetryCollector struct {

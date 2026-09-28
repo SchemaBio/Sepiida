@@ -114,6 +114,7 @@ func main() {
 	// Create service and handler
 	workflowService := service.NewWorkflowService(databaseObj)
 	progressHandler := handler.NewProgressHandler(workflowService)
+	agentHandler := handler.NewAgentHandler(workflowService)
 
 	// Create authentication middleware
 	agentAuth := middleware.NewAgentAuthMiddleware(mkm.GetAgentKeyManager(), *taskTokenSecret, *authMode == "static")
@@ -130,6 +131,7 @@ func main() {
 	serviceCallbackLimit := newIPRateLimiter(parsePositiveIntEnv("SEPIIDA_SERVICE_CALLBACK_RATE_LIMIT_PER_MINUTE", 600), time.Minute)
 	nodeCallbackLimit := newTokenRateLimiter(parsePositiveIntEnv("SEPIIDA_NODE_CALLBACK_RATE_LIMIT_PER_MINUTE", 60), time.Minute)
 	router.Handle("/api/v1/progress", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleProgress))))
+	router.Handle("/api/v1/agent/heartbeat", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(agentHandler.HandleHeartbeat))))
 	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleOutput))))
 	router.Handle("/api/v1/task-tokens/revoke", serviceCallbackLimit.Middleware(revokeHandler))
 
@@ -140,6 +142,7 @@ func main() {
 	router.Handle("/api/v1/workflow", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflow)))
 	router.Handle("/api/v1/workflow/tasks", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleGetWorkflowTasks)))
 	router.Handle("/api/v1/workflows", queryAuth.Middleware(http.HandlerFunc(progressHandler.HandleListWorkflows)))
+	router.Handle("/api/v1/agent/status", queryAuth.Middleware(http.HandlerFunc(agentHandler.HandleStatus)))
 
 	// Keys management API - use query auth (requires query key to access)
 	keysHandler := func(w http.ResponseWriter, r *http.Request) {

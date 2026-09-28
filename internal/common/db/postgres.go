@@ -139,6 +139,21 @@ func (p *PostgreSQL) Initialize(ctx context.Context) error {
 				created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 			)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_token_revocations_expires_at ON task_token_revocations(expires_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sessions (
+				uuid TEXT NOT NULL,
+				agent_id TEXT NOT NULL,
+				workflow_id TEXT NOT NULL DEFAULT '',
+				agent_version TEXT NOT NULL DEFAULT '',
+				collection_interval_seconds INTEGER NOT NULL DEFAULT 0,
+				last_collected_at TIMESTAMPTZ,
+				last_progress_push_at TIMESTAMPTZ,
+				last_collection_status TEXT NOT NULL DEFAULT 'unknown',
+				last_error_code TEXT NOT NULL DEFAULT '',
+				created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (uuid, agent_id)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sessions_attempt ON agent_sessions(uuid, agent_id)`,
 	}
 
 	for _, query := range queries {
@@ -176,6 +191,67 @@ func (p *PostgreSQL) IsTaskTokenRevoked(ctx context.Context, jti string, now int
 			WHERE jti = $1 AND expires_at >= $2
 		)`, jti, now).Scan(&exists)
 	return exists, err
+}
+
+// UpsertAgentHeartbeat records one collector cycle using the database clock.
+func (p *PostgreSQL) UpsertAgentHeartbeat(ctx context.Context, heartbeat *model.AgentHeartbeat) error {
+	if heartbeat == nil || strings.TrimSpace(heartbeat.UUID) == "" || strings.TrimSpace(heartbeat.AgentID) == "" {
+		return fmt.Errorf("uuid and agent_id are required")
+	}
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO agent_sessions
+			(uuid, agent_id, workflow_id, agent_version, collection_interval_seconds,
+			 last_collected_at, last_collection_status, last_error_code, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT (uuid, agent_id) DO UPDATE SET
+			workflow_id = COALESCE(NULLIF(EXCLUDED.workflow_id, ''), agent_sessions.workflow_id),
+			agent_version = COALESCE(NULLIF(EXCLUDED.agent_version, ''), agent_sessions.agent_version),
+			collection_interval_seconds = EXCLUDED.collection_interval_seconds,
+			last_collected_at = CURRENT_TIMESTAMP,
+			last_collection_status = EXCLUDED.last_collection_status,
+			last_error_code = EXCLUDED.last_error_code,
+			updated_at = CURRENT_TIMESTAMP`,
+		heartbeat.UUID, heartbeat.AgentID, heartbeat.WorkflowID, heartbeat.AgentVersion,
+		heartbeat.CollectionIntervalSeconds, heartbeat.CollectionStatus, heartbeat.ErrorCode)
+	return err
+}
+
+// RecordAgentProgressPush uses server receive time and does not refresh the
+// separate collection heartbeat timestamp.
+func (p *PostgreSQL) RecordAgentProgressPush(ctx context.Context, uuid, agentID, workflowID string) error {
+	_, err := p.db.ExecContext(ctx, `
+		INSERT INTO agent_sessions (uuid, agent_id, workflow_id, last_progress_push_at, last_collection_status, created_at, updated_at)
+		VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'unknown', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT (uuid, agent_id) DO UPDATE SET
+			workflow_id = COALESCE(NULLIF(EXCLUDED.workflow_id, ''), agent_sessions.workflow_id),
+			last_progress_push_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP`, uuid, agentID, workflowID)
+	return err
+}
+
+func (p *PostgreSQL) GetAgentSession(ctx context.Context, uuid, agentID string) (*model.AgentSession, error) {
+	row := p.db.QueryRowContext(ctx, `
+		SELECT uuid, agent_id, workflow_id, agent_version, collection_interval_seconds,
+		       last_collected_at, last_progress_push_at, last_collection_status,
+		       last_error_code, created_at, updated_at
+		FROM agent_sessions WHERE uuid = $1 AND agent_id = $2`, uuid, agentID)
+	var session model.AgentSession
+	var collectedAt, progressAt sql.NullTime
+	if err := row.Scan(&session.UUID, &session.AgentID, &session.WorkflowID, &session.AgentVersion,
+		&session.CollectionIntervalSeconds, &collectedAt, &progressAt,
+		&session.LastCollectionStatus, &session.LastErrorCode, &session.CreatedAt, &session.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if collectedAt.Valid {
+		session.LastCollectedAt = &collectedAt.Time
+	}
+	if progressAt.Valid {
+		session.LastProgressPushAt = &progressAt.Time
+	}
+	return &session, nil
 }
 
 // Close closes the database connection
@@ -282,9 +358,15 @@ func (p *PostgreSQL) MarkArchived(ctx context.Context, result *model.ArchiveResu
 	return nil
 }
 
+const workflowSelectColumns = `id, uuid, name, status, start_time, end_time,
+	COALESCE(output_dir, ''), COALESCE(outputs_json::text, ''), COALESCE(agent_id, ''),
+	COALESCE(archived, FALSE), archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''),
+	COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''),
+	COALESCE(archived_count, 0), created_at, updated_at`
+
 // GetWorkflow retrieves a workflow by ID
 func (p *PostgreSQL) GetWorkflow(ctx context.Context, id string) (*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE id=$1`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows WHERE id=$1`
 	row := p.db.QueryRowContext(ctx, query, id)
 
 	workflow := &model.Workflow{}
@@ -304,7 +386,7 @@ func (p *PostgreSQL) GetWorkflow(ctx context.Context, id string) (*model.Workflo
 
 // GetWorkflowByUUID retrieves a workflow by UUID
 func (p *PostgreSQL) GetWorkflowByUUID(ctx context.Context, uuid string) (*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows WHERE uuid=$1 ORDER BY created_at DESC LIMIT 1`
 	row := p.db.QueryRowContext(ctx, query, uuid)
 
 	workflow := &model.Workflow{}
@@ -327,7 +409,7 @@ func (p *PostgreSQL) GetWorkflowByUUID(ctx context.Context, uuid string) (*model
 // legacy rows without agent_id can be checked for ambiguity before a callback
 // binds them to an execution agent.
 func (p *PostgreSQL) ListWorkflowsByUUID(ctx context.Context, uuid string) ([]*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 ORDER BY created_at DESC, id`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows WHERE uuid=$1 ORDER BY created_at DESC, id`
 	rows, err := p.db.QueryContext(ctx, query, uuid)
 	if err != nil {
 		return nil, err
@@ -353,7 +435,7 @@ func (p *PostgreSQL) ListWorkflowsByUUID(ctx context.Context, uuid string) ([]*m
 }
 
 func (p *PostgreSQL) GetWorkflowByAttempt(ctx context.Context, uuid, agentID string) (*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE uuid=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 1`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows WHERE uuid=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 1`
 	row := p.db.QueryRowContext(ctx, query, uuid, agentID)
 
 	workflow := &model.Workflow{}
@@ -373,7 +455,7 @@ func (p *PostgreSQL) GetWorkflowByAttempt(ctx context.Context, uuid, agentID str
 
 // GetWorkflowsByAgent retrieves workflows by agent ID
 func (p *PostgreSQL) GetWorkflowsByAgent(ctx context.Context, agentID string) ([]*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows WHERE agent_id=$1 ORDER BY created_at DESC`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows WHERE agent_id=$1 ORDER BY created_at DESC`
 	rows, err := p.db.QueryContext(ctx, query, agentID)
 	if err != nil {
 		return nil, err
@@ -401,7 +483,7 @@ func (p *PostgreSQL) GetWorkflowsByAgent(ctx context.Context, agentID string) ([
 
 // ListWorkflows lists workflows with pagination
 func (p *PostgreSQL) ListWorkflows(ctx context.Context, limit, offset int) ([]*model.Workflow, error) {
-	query := `SELECT id, uuid, name, status, start_time, end_time, output_dir, outputs_json, COALESCE(agent_id, ''), archived, archived_at, COALESCE(archive_base, ''), COALESCE(base_path, ''), COALESCE(outputs_resolved_key, ''), COALESCE(object_prefix, ''), COALESCE(key_prefix, ''), COALESCE(archived_count, 0), created_at, updated_at FROM workflows ORDER BY created_at DESC LIMIT $1 OFFSET $2`
+	query := `SELECT ` + workflowSelectColumns + ` FROM workflows ORDER BY created_at DESC LIMIT $1 OFFSET $2`
 	rows, err := p.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
 		return nil, err

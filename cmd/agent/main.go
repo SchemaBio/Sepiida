@@ -57,6 +57,7 @@ func main() {
 	archiveTimeout := flag.Duration("archive-timeout", defaultArchiveTimeout(), "archive timeout (for example 30m or 2h; env SEPIIDA_ARCHIVE_TIMEOUT)")
 	archivePrefix := flag.String("archive-prefix", os.Getenv("SEPIIDA_ARCHIVE_PREFIX"), "object-storage prefix for this execution attempt (standard UUID); env: SEPIIDA_ARCHIVE_PREFIX")
 	taskToken := flag.String("task-token", os.Getenv("SEPIIDA_TASK_TOKEN"), "pre-issued per-task write token; env: SEPIIDA_TASK_TOKEN")
+	taskUUID := flag.String("task-uuid", os.Getenv("SEPIIDA_TASK_UUID"), "task UUID used for collection heartbeat; env: SEPIIDA_TASK_UUID")
 	nodeSecret := flag.String("node-secret", firstNonEmptyEnv("SEPIIDA_NODE_SECRET", "CVM_NODE_SECRET"), "secret header for Cloudflare/edge bypass; env: SEPIIDA_NODE_SECRET")
 	flag.Parse()
 	if *showVersion {
@@ -65,6 +66,7 @@ func main() {
 	}
 	if *showCapabilities {
 		fmt.Println("private-callback-fallback-v1")
+		fmt.Println("agent-heartbeat-v1")
 		return
 	}
 	if *nodeCallback {
@@ -181,11 +183,16 @@ func main() {
 	defer ticker.Stop()
 
 	// Run first collection immediately
-	runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix)
+	var heartbeat *model.AgentHeartbeat
+	if strings.TrimSpace(*taskUUID) != "" {
+		heartbeat = &model.AgentHeartbeat{UUID: strings.TrimSpace(*taskUUID), AgentID: *agentID,
+			AgentVersion: agentVersion(), CollectionIntervalSeconds: *interval}
+	}
+	runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix, heartbeat)
 
 	// Then run on interval
 	for range ticker.C {
-		runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix)
+		runCollection(progressCollector, httpSender, workflowArch, *archiveTimeout, *archivePrefix, heartbeat)
 	}
 }
 
@@ -297,10 +304,33 @@ func redactURLForLog(raw string) string {
 	return u.String()
 }
 
-func runCollection(collector progressCollector, sender progressSender, arch workflowArchiver, archiveTimeout time.Duration, archivePrefix string) {
+func runCollection(collector progressCollector, sender progressSender, arch workflowArchiver, archiveTimeout time.Duration, archivePrefix string, heartbeat *model.AgentHeartbeat) {
 	log.Println("Collecting workflow progress...")
 
 	results, err := collector.Collect()
+	if heartbeat != nil {
+		cycle := *heartbeat
+		if err != nil {
+			cycle.CollectionStatus = "error"
+			cycle.ErrorCode = "collection_failed"
+		} else {
+			cycle.CollectionStatus = "ok"
+			cycle.ErrorCode = ""
+			for _, result := range results {
+				if result.Progress.UUID == cycle.UUID {
+					cycle.WorkflowID = result.Progress.Workflow.ID
+					break
+				}
+			}
+		}
+		if heartbeatSender, ok := sender.(interface {
+			SendHeartbeat(*model.AgentHeartbeat) error
+		}); ok {
+			if heartbeatErr := heartbeatSender.SendHeartbeat(&cycle); heartbeatErr != nil {
+				log.Printf("Agent collection heartbeat delivery failed (%s)", cycle.CollectionStatus)
+			}
+		}
+	}
 	if err != nil {
 		log.Printf("Failed to collect progress: %v", err)
 		return

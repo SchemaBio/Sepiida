@@ -12,14 +12,56 @@ type fakeDB struct {
 	workflows     map[string]*model.Workflow
 	tasks         map[string]*model.Task
 	archived      *model.ArchiveResult
+	agentSessions map[string]*model.AgentSession
 	lastListLimit int
 }
 
 func newFakeDB() *fakeDB {
 	return &fakeDB{
-		workflows: make(map[string]*model.Workflow),
-		tasks:     make(map[string]*model.Task),
+		workflows:     make(map[string]*model.Workflow),
+		tasks:         make(map[string]*model.Task),
+		agentSessions: make(map[string]*model.AgentSession),
 	}
+}
+
+func (f *fakeDB) UpsertAgentHeartbeat(_ context.Context, heartbeat *model.AgentHeartbeat) error {
+	key := heartbeat.UUID + "/" + heartbeat.AgentID
+	session := f.agentSessions[key]
+	if session == nil {
+		session = &model.AgentSession{UUID: heartbeat.UUID, AgentID: heartbeat.AgentID, CreatedAt: time.Now().UTC()}
+		f.agentSessions[key] = session
+	}
+	now := time.Now().UTC()
+	session.AgentVersion = heartbeat.AgentVersion
+	session.WorkflowID = heartbeat.WorkflowID
+	session.CollectionIntervalSeconds = heartbeat.CollectionIntervalSeconds
+	session.LastCollectedAt = &now
+	session.LastCollectionStatus = heartbeat.CollectionStatus
+	session.LastErrorCode = heartbeat.ErrorCode
+	session.UpdatedAt = now
+	return nil
+}
+
+func (f *fakeDB) RecordAgentProgressPush(_ context.Context, uuid, agentID, workflowID string) error {
+	key := uuid + "/" + agentID
+	session := f.agentSessions[key]
+	if session == nil {
+		session = &model.AgentSession{UUID: uuid, AgentID: agentID, LastCollectionStatus: "unknown", CreatedAt: time.Now().UTC()}
+		f.agentSessions[key] = session
+	}
+	session.WorkflowID = workflowID
+	now := time.Now().UTC()
+	session.LastProgressPushAt = &now
+	session.UpdatedAt = now
+	return nil
+}
+
+func (f *fakeDB) GetAgentSession(_ context.Context, uuid, agentID string) (*model.AgentSession, error) {
+	if session := f.agentSessions[uuid+"/"+agentID]; session != nil {
+		copy := *session
+		return &copy, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeDB) Initialize(ctx context.Context) error { return nil }
@@ -431,6 +473,27 @@ func TestProcessProgressPreservesExistingOutputsJSONWhenProgressOmitsIt(t *testi
 	}
 	if got := db.workflows["run-1"].OutputsJSON; got != `{"bam":"/data/output/sample-uuid/run-1/result.bam"}` {
 		t.Fatalf("outputs_json was not preserved: %q", got)
+	}
+}
+
+func TestProcessProgressRecordsServerSidePushTimeByAttempt(t *testing.T) {
+	fake := newFakeDB()
+	service := NewWorkflowService(fake)
+	progress := &model.WorkflowProgress{UUID: "task", AgentID: "attempt-a", Workflow: model.Workflow{ID: "run-1", Name: "SingleWES", Status: model.WorkflowStatusRunning}}
+	if err := service.ProcessProgress(context.Background(), progress); err != nil {
+		t.Fatalf("ProcessProgress returned error: %v", err)
+	}
+	session, err := service.GetAgentSession(context.Background(), "task", "attempt-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session == nil || session.LastProgressPushAt == nil || session.LastCollectedAt != nil {
+		t.Fatalf("progress push must update only the server-side push timestamp: %+v", session)
+	}
+	if _, err := service.GetAgentSession(context.Background(), "task", "attempt-b"); err != nil {
+		t.Fatal(err)
+	} else if other, _ := service.GetAgentSession(context.Background(), "task", "attempt-b"); other != nil {
+		t.Fatalf("progress leaked to another attempt: %+v", other)
 	}
 }
 

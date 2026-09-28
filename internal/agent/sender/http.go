@@ -124,6 +124,35 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	return nil
 }
 
+// SendHeartbeat reports collector liveness independently of progress changes.
+func (s *HTTPSender) SendHeartbeat(heartbeat *model.AgentHeartbeat) error {
+	endpoint, err := s.endpoint("/api/v1/agent/heartbeat")
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(heartbeat)
+	if err != nil {
+		return fmt.Errorf("failed to marshal agent heartbeat: %w", err)
+	}
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create agent heartbeat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := s.authorize(req, heartbeat.UUID, heartbeat.WorkflowID); err != nil {
+		return err
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send agent heartbeat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return responseError(resp)
+	}
+	return nil
+}
+
 // NotifyArchived notifies the server that a workflow's outputs have been archived.
 func (s *HTTPSender) NotifyArchived(result *model.ArchiveResult) error {
 	endpoint, err := s.endpoint("/api/v1/workflow/archive")

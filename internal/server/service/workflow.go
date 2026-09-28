@@ -22,6 +22,12 @@ type WorkflowService struct {
 	db db.Database
 }
 
+type agentSessionStore interface {
+	UpsertAgentHeartbeat(context.Context, *model.AgentHeartbeat) error
+	RecordAgentProgressPush(context.Context, string, string, string) error
+	GetAgentSession(context.Context, string, string) (*model.AgentSession, error)
+}
+
 // NewWorkflowService creates a new workflow service
 func NewWorkflowService(db db.Database) *WorkflowService {
 	return &WorkflowService{db: db}
@@ -86,8 +92,29 @@ func (s *WorkflowService) ProcessProgress(ctx context.Context, progress *model.W
 			}
 		}
 	}
+	if store, ok := s.db.(agentSessionStore); ok {
+		if err := store.RecordAgentProgressPush(ctx, progress.UUID, progress.AgentID, storageWorkflowID); err != nil {
+			return err
+		}
+	}
 
 	return nil
+}
+
+func (s *WorkflowService) RecordAgentHeartbeat(ctx context.Context, heartbeat *model.AgentHeartbeat) error {
+	store, ok := s.db.(agentSessionStore)
+	if !ok {
+		return errors.New("agent session storage is unavailable")
+	}
+	return store.UpsertAgentHeartbeat(ctx, heartbeat)
+}
+
+func (s *WorkflowService) GetAgentSession(ctx context.Context, uuid, agentID string) (*model.AgentSession, error) {
+	store, ok := s.db.(agentSessionStore)
+	if !ok {
+		return nil, errors.New("agent session storage is unavailable")
+	}
+	return store.GetAgentSession(ctx, uuid, agentID)
 }
 
 // ProcessOutput processes workflow output

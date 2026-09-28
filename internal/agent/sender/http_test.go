@@ -73,6 +73,33 @@ func TestSendProgressPrefersProvidedTaskToken(t *testing.T) {
 	}
 }
 
+func TestSendHeartbeatUsesAttemptTokenAndBoundedFields(t *testing.T) {
+	const secret = "0123456789abcdef0123456789abcdef"
+	var got model.AgentHeartbeat
+	var authorization, requestPath string
+	sender := NewHTTPSenderWithTaskToken("http://sepiida.test", "", "attempt-1", secret)
+	sender.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requestPath = r.URL.Path
+		authorization = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode heartbeat: %v", err)
+		}
+		return testResponse(http.StatusNoContent, ""), nil
+	})}
+
+	heartbeat := &model.AgentHeartbeat{UUID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", AgentID: "attempt-1", AgentVersion: "test", CollectionIntervalSeconds: 15, CollectionStatus: "error", ErrorCode: "collection_failed"}
+	if err := sender.SendHeartbeat(heartbeat); err != nil {
+		t.Fatalf("SendHeartbeat returned error: %v", err)
+	}
+	claims, err := tasktoken.Validate(secret, strings.TrimPrefix(authorization, "Bearer "))
+	if err != nil {
+		t.Fatalf("heartbeat did not use an attempt token: %v", err)
+	}
+	if requestPath != "/api/v1/agent/heartbeat" || claims.UUID != heartbeat.UUID || claims.AttemptID != "attempt-1" || got.CollectionStatus != "error" || got.ErrorCode != "collection_failed" {
+		t.Fatalf("unexpected heartbeat delivery: path=%q claims=%+v body=%+v", requestPath, claims, got)
+	}
+}
+
 func TestNotifyArchivedSendsAgentAndWorkflowID(t *testing.T) {
 	var req model.ArchiveResult
 	sender := NewHTTPSender("http://sepiida.test", "static-key", "agent-1")
