@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SchemaBio/Sepiida/internal/agent/callback"
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
@@ -106,7 +107,14 @@ func NewCOSBackendWithNodeCredentials(rawURL string, accessKeyID string, secretA
 			return nil, fmt.Errorf("task token required for credential renewal")
 		}
 		nodeSecret := strings.TrimSpace(credentials.NodeSecret)
-		transport = &renewableCOSTransport{endpoint: endpoint, token: token, nodeSecret: nodeSecret}
+		route := credentials.CallbackClient
+		if route == nil && strings.TrimSpace(credentials.PrivateAddr) != "" {
+			route, err = callback.NewClient(credentials.PrivateAddr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid private credential callback address: %w", err)
+			}
+		}
+		transport = &renewableCOSTransport{endpoint: endpoint, token: token, nodeSecret: nodeSecret, callbackClient: route}
 	} else if accessKeyID != "" && secretAccessKey != "" {
 		transport = &cos.AuthorizationTransport{
 			SecretID:     accessKeyID,

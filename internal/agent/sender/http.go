@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SchemaBio/Sepiida/internal/agent/callback"
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
@@ -30,12 +31,20 @@ type HTTPSender struct {
 
 // NewHTTPSender creates a new HTTP sender
 func NewHTTPSender(serverURL, apiKey, agentID string) *HTTPSender {
+	return newHTTPSender(serverURL, apiKey, agentID, callback.DirectClient())
+}
+
+func newHTTPSender(serverURL, apiKey, agentID string, route *callback.Client) *HTTPSender {
+	if route == nil {
+		route = callback.DirectClient()
+	}
 	return &HTTPSender{
 		serverURL: serverURL,
 		apiKey:    apiKey,
 		agentID:   agentID,
 		client: &http.Client{
-			Timeout: defaultHTTPTimeout,
+			Timeout:   defaultHTTPTimeout,
+			Transport: route,
 			// Callbacks must reach the configured API directly. Redirects can
 			// otherwise forward the node secret or turn a POST into a GET.
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -56,6 +65,15 @@ func NewHTTPSenderWithTaskToken(serverURL, apiKey, agentID, taskTokenSecret stri
 // than the signing secret.
 func NewHTTPSenderWithTaskCredential(serverURL, apiKey, agentID, taskToken, taskTokenSecret string) *HTTPSender {
 	s := NewHTTPSender(serverURL, apiKey, agentID)
+	s.taskToken = strings.TrimSpace(taskToken)
+	s.taskTokenSecret = taskTokenSecret
+	return s
+}
+
+// NewHTTPSenderWithTaskCredentialAndRoute configures a sender to share the
+// agent's private-first callback route with archive credential renewal.
+func NewHTTPSenderWithTaskCredentialAndRoute(serverURL, apiKey, agentID, taskToken, taskTokenSecret string, route *callback.Client) *HTTPSender {
+	s := newHTTPSender(serverURL, apiKey, agentID, route)
 	s.taskToken = strings.TrimSpace(taskToken)
 	s.taskTokenSecret = taskTokenSecret
 	return s

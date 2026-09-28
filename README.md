@@ -170,7 +170,10 @@ SaaS `task-token` 的撤销记录持久化在 Sepiida PostgreSQL 的
 | `-key` | API Key（需在agent-keys.txt中） | （需指定） |
 | `-task-token` | Squid 签发的任务令牌，与 `-key` 二选一 | `SEPIIDA_TASK_TOKEN` |
 | `-node-secret` | Cloudflare 规则匹配的 `x-node-secret` 请求头；同时用于回调和 COS 临时凭据续期 | `SEPIIDA_NODE_SECRET`，回退到 `CVM_NODE_SECRET` |
+| `-private-addr` | 可选 RFC1918 `IPv4:port`，优先通过腾讯云内网拨号；保留 `-s` 的 Host、SNI 和证书校验，失败后回退公网 | `SEPIIDA_PRIVATE_ADDR` |
+| `-credentials-private-addr` | 可选 RFC1918 `IPv4:port`，供 Squid 的 COS 临时凭据接口优先通过内网拨号；保留凭据 URL 的 Host、SNI 和证书校验 | `CVM_NODE_PRIVATE_ADDR` |
 | `-version` | 输出构建提交、工作区修改标记、Go 版本和目标平台后退出，无需令牌 | — |
+| `-capabilities` | 输出镜像启动前可检查的机器可读能力名称后退出 | — |
 | `-id` | Agent ID | agent-001 |
 | `-i` | 推送间隔（秒） | 60 |
 | `-w` | 监控目录（UUID目录的父目录） | ./output |
@@ -202,6 +205,14 @@ SaaS 启动时，Squid 注入 `SEPIIDA_TASK_TOKEN`、`SEPIIDA_CREDENTIALS_URL`�
 以及配置了 `CVM_NODE_SECRET` 时的 `SEPIIDA_NODE_SECRET`。任务令牌仍用于应用认证，
 节点密钥用于匹配 Cloudflare 的 API 放行规则。Agent 的进度、输出、归档通知和
 COS 凭据续期使用相同的任务令牌及节点密钥，命令行参数优先于环境变量。
+
+当 CVM 与 SaaS 主机处于可互通的腾讯云 VPC 时，Squid 可注入
+`SEPIIDA_PRIVATE_ADDR=10.x.x.x:443` 用于 Sepiida 接口，并注入
+`CVM_NODE_PRIVATE_ADDR=10.x.x.x:443` 用于 Squid 的临时 COS 凭据接口。Agent
+会保留各自公开 URL 的域名作为 Host、SNI 和证书名称；私网连接、TLS 或 5xx 失败后
+会重试原公网地址。使用前确认反向代理的私网 443 入口允许计算节点子网，并使用 CVM
+镜像信任的证书。`sepiida-agent --capabilities` 必须包含
+`private-callback-fallback-v1`，供 Squid 在启动前识别兼容镜像。
 密钥请求头不会发送到 COS 对象存储。认证请求拒绝跟随重定向，服务器 URL 应直接指向 API。
 
 Cloudflare 需要配置相应规则后才能放行；仅更新 Agent 不会改变边缘规则。

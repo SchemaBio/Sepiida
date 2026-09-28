@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/agent/archiver"
+	"github.com/SchemaBio/Sepiida/internal/agent/callback"
 	"github.com/SchemaBio/Sepiida/internal/agent/collector"
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
 	"github.com/SchemaBio/Sepiida/internal/agent/sender"
@@ -39,7 +40,13 @@ type workflowArchiver interface {
 func main() {
 	// Command line flags
 	showVersion := flag.Bool("version", false, "print agent build version and exit")
+	showCapabilities := flag.Bool("capabilities", false, "print supported machine-readable capability names and exit")
+	nodeCallback := flag.Bool("node-callback", false, "post one node callback from stdin and exit")
+	nodeCallbackURL := flag.String("node-callback-url", "", "node callback HTTPS URL")
+	nodeCallbackStateFile := flag.String("node-callback-state-file", "/run/schemabio-node-callback-route.json", "node callback route state file")
 	serverURL := flag.String("s", defaultServerURL(), "server URL; env: SEPIIDA_SERVER_URL")
+	privateAddr := flag.String("private-addr", os.Getenv("SEPIIDA_PRIVATE_ADDR"), "private HTTPS callback address (RFC1918 IPv4:port); env: SEPIIDA_PRIVATE_ADDR")
+	credentialsPrivateAddr := flag.String("credentials-private-addr", os.Getenv("CVM_NODE_PRIVATE_ADDR"), "private HTTPS credential callback address (RFC1918 IPv4:port); env: CVM_NODE_PRIVATE_ADDR")
 	apiKey := flag.String("key", os.Getenv("SEPIIDA_AGENT_KEY"), "API key for authentication; env: SEPIIDA_AGENT_KEY")
 	agentID := flag.String("id", firstNonEmptyEnv("SEPIIDA_AGENT_ID", "HOSTNAME"), "agent identifier; env: SEPIIDA_AGENT_ID")
 	interval := flag.Int("i", parsePositiveIntEnv("SEPIIDA_AGENT_INTERVAL", 60), "poll interval in seconds; env: SEPIIDA_AGENT_INTERVAL")
@@ -56,6 +63,13 @@ func main() {
 		fmt.Println(agentVersion())
 		return
 	}
+	if *showCapabilities {
+		fmt.Println("private-callback-fallback-v1")
+		return
+	}
+	if *nodeCallback {
+		os.Exit(runNodeCallback(*nodeCallbackURL, *privateAddr, *nodeCallbackStateFile))
+	}
 
 	// Parse watch directories
 	dirs := parseWatchDirs(*watchDirs)
@@ -70,6 +84,26 @@ func main() {
 	}
 	if *serverURL == "" {
 		*serverURL = "http://localhost:9090"
+	}
+	if strings.TrimSpace(*privateAddr) != "" {
+		if err := callback.ValidatePrivateAddress(*privateAddr); err != nil {
+			log.Fatalf("invalid private callback address: %v", err)
+		}
+		server, err := url.Parse(*serverURL)
+		if err != nil || !strings.EqualFold(server.Scheme, "https") || server.Host == "" {
+			log.Fatal("private callback routing requires an HTTPS server URL")
+		}
+	}
+	if strings.TrimSpace(*credentialsPrivateAddr) != "" {
+		if err := callback.ValidatePrivateAddress(*credentialsPrivateAddr); err != nil {
+			log.Fatalf("invalid private credential callback address: %v", err)
+		}
+		if credentialsURL := strings.TrimSpace(os.Getenv("SEPIIDA_CREDENTIALS_URL")); credentialsURL != "" {
+			credentials, err := url.Parse(credentialsURL)
+			if err != nil || !strings.EqualFold(credentials.Scheme, "https") || credentials.Host == "" {
+				log.Fatal("private credential callback routing requires an HTTPS credential URL")
+			}
+		}
 	}
 	if err := validateAgentCredentials(*apiKey, *taskToken); err != nil {
 		log.Fatal(err)
@@ -96,11 +130,25 @@ func main() {
 	if strings.TrimSpace(*nodeSecret) != "" {
 		log.Printf("Edge Node Secret: configured")
 	}
+	route, err := callback.NewClient(*privateAddr)
+	if err != nil {
+		log.Fatalf("configure private callback route: %v", err)
+	}
+	credentialsRoute, err := callback.NewClient(*credentialsPrivateAddr)
+	if err != nil {
+		log.Fatalf("configure private credential callback route: %v", err)
+	}
+	if route.PrivateAddress() != "" {
+		log.Printf("Private callback route: configured")
+	}
+	if credentialsRoute.PrivateAddress() != "" {
+		log.Printf("Private credential callback route: configured")
+	}
 
 	// Create components
 	logParser := parser.NewLogParser()
 	progressCollector := collector.NewProgressCollector(logParser, dirs, *agentID)
-	httpSender := sender.NewHTTPSenderWithTaskCredential(*serverURL, *apiKey, *agentID, *taskToken, "")
+	httpSender := sender.NewHTTPSenderWithTaskCredentialAndRoute(*serverURL, *apiKey, *agentID, *taskToken, "", route)
 	if strings.TrimSpace(*nodeSecret) != "" {
 		httpSender.SetNodeSecret(*nodeSecret)
 	}
@@ -112,6 +160,8 @@ func main() {
 		nodeCredentials := archiver.NodeCredentialsFromEnv()
 		nodeCredentials.TaskToken = *taskToken
 		nodeCredentials.NodeSecret = *nodeSecret
+		nodeCredentials.PrivateAddr = *credentialsPrivateAddr
+		nodeCredentials.CallbackClient = credentialsRoute
 		arch, err = archiver.NewFromPathWithNodeCredentials(*archivePath, *archiveKeyID, *archiveKeySecret, nodeCredentials)
 		if err != nil {
 			log.Fatalf("Failed to initialize archiver: %v", err)

@@ -10,15 +10,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SchemaBio/Sepiida/internal/agent/callback"
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
 // NodeCredentials identifies a compute attempt to the credential API. It does
 // not contain the server's token signing key or permanent COS credentials.
 type NodeCredentials struct {
-	Endpoint   string
-	TaskToken  string
-	NodeSecret string
+	Endpoint       string
+	TaskToken      string
+	NodeSecret     string
+	PrivateAddr    string
+	CallbackClient *callback.Client
 }
 
 func NodeCredentialsFromEnv() NodeCredentials {
@@ -27,9 +30,10 @@ func NodeCredentialsFromEnv() NodeCredentials {
 		secret = strings.TrimSpace(os.Getenv("CVM_NODE_SECRET"))
 	}
 	return NodeCredentials{
-		Endpoint:   strings.TrimSpace(os.Getenv("SEPIIDA_CREDENTIALS_URL")),
-		TaskToken:  strings.TrimSpace(os.Getenv("SEPIIDA_TASK_TOKEN")),
-		NodeSecret: secret,
+		Endpoint:    strings.TrimSpace(os.Getenv("SEPIIDA_CREDENTIALS_URL")),
+		TaskToken:   strings.TrimSpace(os.Getenv("SEPIIDA_TASK_TOKEN")),
+		NodeSecret:  secret,
+		PrivateAddr: strings.TrimSpace(os.Getenv("SEPIIDA_PRIVATE_ADDR")),
 	}
 }
 
@@ -38,6 +42,7 @@ func NodeCredentialsFromEnv() NodeCredentials {
 type renewableCOSTransport struct {
 	endpoint, token string
 	nodeSecret      string
+	callbackClient  *callback.Client
 	mu              sync.Mutex
 	transport       *cos.AuthorizationTransport
 	expires         time.Time
@@ -56,6 +61,9 @@ func (t *renewableCOSTransport) RoundTrip(request *http.Request) (*http.Response
 			req.Header.Set("x-node-secret", t.nodeSecret)
 		}
 		client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+		if t.callbackClient != nil {
+			client.Transport = t.callbackClient
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			t.mu.Unlock()

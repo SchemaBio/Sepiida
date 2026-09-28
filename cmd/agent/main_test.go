@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +67,71 @@ func TestWorkflowArchiverForNilReturnsNilInterface(t *testing.T) {
 	if got := workflowArchiverFor(nil); got != nil {
 		t.Fatalf("nil archiver became a non-nil interface: %#v", got)
 	}
+}
+
+func TestNodeCallbackSendsTaskIdentityAndPersistsRouteState(t *testing.T) {
+	previous := newNodeCallbackRoute
+	t.Cleanup(func() { newNodeCallbackRoute = previous })
+	route := &nodeCallbackRouteFake{response: nodeCallbackResponse(http.StatusNoContent)}
+	newNodeCallbackRoute = func(address string) (nodeCallbackRoute, error) {
+		if address != "10.0.0.9:443" {
+			t.Fatalf("unexpected private address: %q", address)
+		}
+		return route, nil
+	}
+	t.Setenv("SEPIIDA_TASK_TOKEN", "task-token")
+	t.Setenv("SEPIIDA_NODE_SECRET", "node-secret")
+	stateFile := t.TempDir() + "/route.json"
+	var output bytes.Buffer
+	code := runNodeCallbackIO("https://squid.example/api/v1/cvm/node/status", "10.0.0.9:443", stateFile, strings.NewReader(`{"phase":"starting"}`), &output)
+	if code != 0 || output.String() != "204||upstream\n" {
+		t.Fatalf("unexpected node callback result: code=%d output=%q", code, output.String())
+	}
+	if route.request == nil || route.request.Header.Get("Authorization") != "Bearer task-token" || route.request.Header.Get("x-node-secret") != "node-secret" {
+		t.Fatalf("node callback lost its identity headers: %#v", route.request)
+	}
+	if got := loadNodeCallbackCooldown(stateFile); got.IsZero() {
+		t.Fatal("node callback did not write its route cooldown file")
+	}
+}
+
+func TestNodeCallbackRejectsInvalidPayloadWithoutRequest(t *testing.T) {
+	previous := newNodeCallbackRoute
+	t.Cleanup(func() { newNodeCallbackRoute = previous })
+	called := false
+	newNodeCallbackRoute = func(string) (nodeCallbackRoute, error) { called = true; return &nodeCallbackRouteFake{}, nil }
+	t.Setenv("SEPIIDA_TASK_TOKEN", "task-token")
+	var output bytes.Buffer
+	code := runNodeCallbackIO("https://squid.example/api", "10.0.0.9:443", t.TempDir()+"/route.json", strings.NewReader("not-json"), &output)
+	if code == 0 || called || output.String() != "0||network\n" {
+		t.Fatalf("invalid payload was accepted: code=%d called=%t output=%q", code, called, output.String())
+	}
+}
+
+type nodeCallbackRouteFake struct {
+	request  *http.Request
+	response *http.Response
+	cooldown time.Time
+}
+
+func (f *nodeCallbackRouteFake) RoundTrip(request *http.Request) (*http.Response, error) {
+	f.request = request
+	if f.response == nil {
+		return nil, io.EOF
+	}
+	return f.response, nil
+}
+
+func (f *nodeCallbackRouteFake) SetPrivateCooldownUntil(deadline time.Time) { f.cooldown = deadline }
+func (f *nodeCallbackRouteFake) PrivateCooldownUntil() time.Time {
+	if f.cooldown.IsZero() {
+		return time.Now().Add(time.Minute)
+	}
+	return f.cooldown
+}
+
+func nodeCallbackResponse(status int) *http.Response {
+	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}
 }
 
 func TestRunCollectionRetriesArchiveNotificationWithoutReupload(t *testing.T) {
