@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
 	"strings"
 
@@ -50,7 +49,10 @@ func buildSingleFileParquet(filePath string) ([]byte, []string, error) {
 
 	// Parse CSV/TSV content to get headers and rows
 	delimiter := detectDelimiter(data)
-	headers, rows := parseCSVContentWithHeaders(data, delimiter)
+	headers, rows, err := parseCSVContentWithHeaders(data, delimiter)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse table: %w", err)
+	}
 
 	if len(headers) == 0 {
 		return nil, nil, fmt.Errorf("no header found")
@@ -72,8 +74,8 @@ func buildSingleFileParquet(filePath string) ([]byte, []string, error) {
 	writtenRows := 0
 	for _, row := range rows {
 		if err := writer.Write(row); err != nil {
-			log.Printf("Warning: failed to write row: %v", err)
-			continue
+			_ = writer.Close()
+			return nil, nil, fmt.Errorf("failed to write parquet row %d: %w", writtenRows+1, err)
 		}
 		writtenRows++
 	}
@@ -171,11 +173,12 @@ func detectDelimiter(content []byte) rune {
 // parseCSVContentWithHeaders parses CSV/TSV content and returns headers and data rows.
 // First line is treated as header, subsequent lines as data.
 // Returns headers (column names) and rows (map of column -> value).
-func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map[string]string) {
+func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map[string]string, error) {
 	reader := csv.NewReader(bytes.NewReader(content))
 	reader.Comma = delimiter
 	reader.LazyQuotes = true
-	reader.TrimLeadingSpace = true
+	// Tabs delimit empty TSV fields and must not be trimmed as whitespace.
+	// The reader infers the required field count from the header.
 
 	var headers []string
 	var safeHeaders []string
@@ -187,7 +190,7 @@ func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map
 			break
 		}
 		if err != nil {
-			continue // Skip malformed lines
+			return nil, nil, fmt.Errorf("invalid table record: %w", err)
 		}
 
 		// Skip empty lines
@@ -205,19 +208,13 @@ func parseCSVContentWithHeaders(content []byte, delimiter rune) ([]string, []map
 		// Build row map with sanitized column names matching the schema
 		row := make(map[string]string)
 		for i, val := range record {
-			if i >= len(safeHeaders) {
-				// Ignore overflow columns. The Parquet schema is derived from
-				// the header, and adding ad-hoc fields here can make the whole
-				// row fail to write for malformed CSV/TSV lines.
-				break
-			}
 			row[safeHeaders[i]] = val
 		}
 
 		rows = append(rows, row)
 	}
 
-	return headers, rows
+	return headers, rows, nil
 }
 
 // relativePath returns the relative path from base to target, using forward slashes.

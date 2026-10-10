@@ -559,26 +559,14 @@ func TestParquetColumnNamesAreUniqueAndStable(t *testing.T) {
 	}
 }
 
-func TestBuildSingleFileParquetIgnoresOverflowColumns(t *testing.T) {
+func TestBuildSingleFileParquetRejectsOverflowColumns(t *testing.T) {
 	executionDir := t.TempDir()
 	table := filepath.Join(executionDir, "table.csv")
 	mustWrite(t, table, "gene,value\nBRCA1,42,unexpected\nBRCA2,7\n")
 
-	data, columns, err := buildSingleFileParquet(table)
-	if err != nil {
-		t.Fatalf("buildSingleFileParquet returned error: %v", err)
-	}
-	if len(data) == 0 {
-		t.Fatal("expected parquet data to be written")
-	}
-	want := []string{"gene", "value"}
-	if len(columns) != len(want) {
-		t.Fatalf("unexpected columns: got %v want %v", columns, want)
-	}
-	for i := range want {
-		if columns[i] != want[i] {
-			t.Fatalf("unexpected columns: got %v want %v", columns, want)
-		}
+	data, _, err := buildSingleFileParquet(table)
+	if err == nil || len(data) != 0 {
+		t.Fatalf("malformed report must not produce partial parquet: bytes=%d err=%v", len(data), err)
 	}
 }
 
