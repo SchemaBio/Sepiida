@@ -108,7 +108,7 @@ func (p *LogParser) ParseTaskRunning(line string) (*TaskEvent, error) {
 // ParseTaskExit parses task exit line
 // Format: 2026-04-28 09:50:00.334 wdl.w:SingleWES.t:call-CreateMitoBed NOTICE docker task exit :: state: "complete", exit_code: 0
 func (p *LogParser) ParseTaskExit(line string) (*TaskEvent, error) {
-	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:[^\s]+\.t:(call-[^\s]+) NOTICE docker task exit :: state: "([^"]+)", exit_code: (\d+)`)
+	pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:[^\s]+\.t:(call-[^\s]+) (?:NOTICE|ERROR) docker task exit :: state: "([^"]+)", exit_code: (-?\d+)`)
 	matches := pattern.FindStringSubmatch(line)
 
 	if len(matches) < 5 {
@@ -210,6 +210,14 @@ func (p *LogParser) ParseLogFile(filePath string) (*model.Workflow, []model.Task
 				continue
 			}
 			taskEvents[event.JobName] = append(taskEvents[event.JobName], *event)
+		} else if workflow != nil && strings.Contains(line, "wdl.w:"+workflow.Name+" NOTICE aborting workflow") {
+			// A root workflow abort also covers expression/setup failures with no
+			// Docker task exit event. Do not mistake a child workflow for the root.
+			pattern := regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+) wdl\.w:` + regexp.QuoteMeta(workflow.Name) + ` NOTICE aborting workflow$`)
+			if match := pattern.FindStringSubmatch(line); len(match) == 2 {
+				workflow.Status = model.WorkflowStatusFailed
+				workflow.EndTime, _ = parseTimestamp(match[1])
+			}
 		} else if strings.Contains(line, "NOTICE done") && !strings.Contains(line, ".t:") {
 			event, err := p.ParseWorkflowDone(line)
 			if err != nil {

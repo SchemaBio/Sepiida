@@ -8,7 +8,51 @@ import (
 	"testing"
 
 	"github.com/SchemaBio/Sepiida/internal/agent/parser"
+	"github.com/SchemaBio/Sepiida/internal/common/model"
 )
+
+func TestCollectDetectsErrorMarkerWithoutLogChange(t *testing.T) {
+	root := t.TempDir()
+	uuid := "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+	dir := setupCollectorWorkflow(t, root, uuid, "run-one")
+	logPath := filepath.Join(dir, "workflow.log")
+	writeCollectorTestFile(t, logPath, `2026-10-17 18:08:49.000 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "single.wdl", dir: "`+dir+`"`+"\n")
+	c := NewProgressCollector(parser.NewLogParser(), []string{root}, "agent")
+	results, err := c.Collect()
+	if err != nil || len(results) != 1 {
+		t.Fatalf("first collect: %v, results=%d", err, len(results))
+	}
+	if err := c.SaveState(results[0].UUIDDir, results[0].State); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{`{`, `{}`, `{"error":""}`, `null`} {
+		writeCollectorTestFile(t, filepath.Join(dir, "error.json"), marker)
+		unchanged, err := c.Collect()
+		if err != nil || len(unchanged) != 0 {
+			t.Fatalf("invalid marker changed running status: %q err=%v", marker, err)
+		}
+	}
+	writeCollectorTestFile(t, filepath.Join(dir, "error.json"), `{"error":"RunFailed","cause":{"error":"CommandFailed","exit_status":2}}`)
+	results, err = c.Collect()
+	if err != nil || len(results) != 1 || results[0].Progress.Workflow.Status != model.WorkflowStatusFailed || results[0].Progress.Workflow.EndTime == nil {
+		t.Fatalf("terminal marker not pushed: results=%+v err=%v", results, err)
+	}
+	if err := c.SaveState(results[0].UUIDDir, results[0].State); err != nil {
+		t.Fatal(err)
+	}
+	results, err = c.Collect()
+	if err != nil || len(results) != 0 {
+		t.Fatalf("unchanged failure should not push repeatedly: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, uuid, "_LAST")); err != nil {
+		t.Fatal(err)
+	}
+	setupCollectorWorkflow(t, root, uuid, "run-two")
+	results, err = c.Collect()
+	if err != nil || len(results) != 1 || results[0].Progress.Workflow.Status != model.WorkflowStatusSuccess {
+		t.Fatalf("old failure contaminated new execution: results=%+v err=%v", results, err)
+	}
+}
 
 func TestCollectReadsWorkflowOutputsAndTaskLogs(t *testing.T) {
 	watchDir := t.TempDir()

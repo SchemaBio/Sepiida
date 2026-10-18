@@ -155,3 +155,24 @@ func writeParserTestFile(t *testing.T, path string, data string) {
 		t.Fatalf("failed to write %s: %v", path, err)
 	}
 }
+
+func TestParseRealMiniWDLFailureEvents(t *testing.T) {
+	for _, ending := range []string{
+		`2026-10-17 20:01:15.562 wdl.w:SingleWES.t:call-MitochondrialMutect2 ERROR docker task exit :: state: "failed", exit_code: 2`,
+		`2026-10-17 20:01:15.633 wdl.w:SingleWES NOTICE aborting workflow`,
+	} {
+		t.Run(ending, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "workflow.log")
+			writeParserTestFile(t, logPath,
+				`2026-10-17 18:08:49.000 wdl.w:SingleWES NOTICE workflow start :: name: "SingleWES", source: "single.wdl", dir: "/runs/run"`+"\n"+
+					`2026-10-17 20:00:00.000 wdl.w:SingleWES.t:call-MitochondrialMutect2 NOTICE task setup :: name: "MitochondrialMutect2", source: "gatk.wdl", dir: "/runs/run/call-MitochondrialMutect2"`+"\n"+ending+"\n")
+			workflow, tasks, err := NewLogParser().ParseLogFile(logPath)
+			if err != nil || workflow == nil || workflow.Status != model.WorkflowStatusFailed || workflow.EndTime == nil {
+				t.Fatalf("failed run was not detected: workflow=%+v err=%v", workflow, err)
+			}
+			if strings.Contains(ending, "docker task exit") && (len(tasks) != 1 || tasks[0].ExitCode == nil || *tasks[0].ExitCode != 2 || tasks[0].Status != model.TaskStatusFailed) {
+				t.Fatalf("failed task exit was not retained: %+v", tasks)
+			}
+		})
+	}
+}

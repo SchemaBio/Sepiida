@@ -22,6 +22,7 @@ var uuidPattern = regexp.MustCompile(`^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]
 const (
 	maxTaskLogBytes          = 1 << 20  // 1 MiB per stdout/stderr file
 	maxOutputsJSONBytes      = 10 << 20 // 10 MiB for outputs.json
+	maxErrorJSONBytes        = 1 << 20  // 1 MiB for the root error.json
 	maxResolvedJSONFileBytes = 1 << 20  // 1 MiB per nested JSON manifest
 	maxLastPointerBytes      = 4 << 10  // 4 KiB for _LAST file fallback
 	maxJSONResolveDepth      = 32
@@ -129,6 +130,10 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 		if err != nil || workflow == nil {
 			continue
 		}
+		// MiniWDL writes this terminal marker in the concrete execution directory.
+		// Check every poll, even when workflow.log has not changed; never inspect
+		// a previous execution or a child task's error.json here.
+		applyWorkflowError(executionDir, workflow)
 
 		// Set UUID for workflow
 		workflow.UUID = uuid
@@ -182,6 +187,25 @@ func (c *ProgressCollector) collectFromDir(dir string, results []CollectResult) 
 	}
 
 	return results, nil
+}
+
+func applyWorkflowError(executionDir string, workflow *model.Workflow) {
+	path := filepath.Join(executionDir, "error.json")
+	data, err := readRegularFileWithin(executionDir, path, maxErrorJSONBytes)
+	if err != nil {
+		return
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(data, &failure) != nil || strings.TrimSpace(failure.Error) == "" {
+		return
+	}
+	workflow.Status = model.WorkflowStatusFailed
+	if info, err := os.Stat(path); err == nil {
+		finished := info.ModTime()
+		workflow.EndTime = &finished
+	}
 }
 
 // isValidUUID checks if the string is a valid UUID format
