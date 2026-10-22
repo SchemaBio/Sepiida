@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 	"github.com/SchemaBio/Sepiida/internal/server/middleware"
@@ -13,6 +14,35 @@ type AgentHandler struct{ service *service.WorkflowService }
 
 func NewAgentHandler(workflows *service.WorkflowService) *AgentHandler {
 	return &AgentHandler{service: workflows}
+}
+
+// HandleReady confirms a real collection heartbeat, without creating one on
+// behalf of the agent. The task token fixes both lookup keys to this attempt.
+func (h *AgentHandler) HandleReady(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	claims, ok := middleware.TaskTokenClaims(r.Context())
+	if !ok || claims.AttemptID == "" || claims.AttemptID != claims.AgentID {
+		http.Error(w, "attempt task token required", http.StatusUnauthorized)
+		return
+	}
+	session, err := h.service.GetAgentSession(r.Context(), claims.UUID, claims.AgentID)
+	if err != nil {
+		http.Error(w, "failed to check agent readiness", http.StatusServiceUnavailable)
+		return
+	}
+	if session != nil && session.LastCollectedAt != nil && session.LastCollectionStatus == "ok" {
+		age := time.Since(*session.LastCollectedAt)
+		if age >= 0 && age <= 90*time.Second {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	w.Header().Set("Retry-After", "3")
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (h *AgentHandler) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {

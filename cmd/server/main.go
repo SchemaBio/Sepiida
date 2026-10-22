@@ -132,6 +132,7 @@ func main() {
 	nodeCallbackLimit := newTokenRateLimiter(parsePositiveIntEnv("SEPIIDA_NODE_CALLBACK_RATE_LIMIT_PER_MINUTE", 60), time.Minute)
 	router.Handle("/api/v1/progress", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleProgress))))
 	router.Handle("/api/v1/agent/heartbeat", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(agentHandler.HandleHeartbeat))))
+	router.Handle("/api/v1/agent/ready", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(agentHandler.HandleReady))))
 	router.Handle("/api/v1/workflow/output", agentAuth.Middleware(nodeCallbackLimit.Middleware(http.HandlerFunc(progressHandler.HandleOutput))))
 	router.Handle("/api/v1/task-tokens/revoke", serviceCallbackLimit.Middleware(revokeHandler))
 

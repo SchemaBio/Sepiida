@@ -153,3 +153,54 @@ func TestHandleAgentStatusIsAttemptScoped(t *testing.T) {
 		t.Fatalf("missing attempt should return legacy/unknown, got %d %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestHandleReadyRequiresFreshSuccessfulCollectionForTokenAttempt(t *testing.T) {
+	now, stale := time.Now().UTC(), time.Now().UTC().Add(-2*time.Minute)
+	for _, tc := range []struct {
+		name    string
+		session *model.AgentSession
+		want    int
+	}{
+		{"missing", nil, http.StatusAccepted},
+		{"progress without collection", &model.AgentSession{LastProgressPushAt: &now}, http.StatusAccepted},
+		{"stale", &model.AgentSession{LastCollectedAt: &stale, LastCollectionStatus: "ok"}, http.StatusAccepted},
+		{"collection error", &model.AgentSession{LastCollectedAt: &now, LastCollectionStatus: "error"}, http.StatusAccepted},
+		{"ready", &model.AgentSession{LastCollectedAt: &now, LastCollectionStatus: "ok"}, http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newAgentSessionDB()
+			db.sessions[agentSessionKey(testUUID, "other-attempt")] = &model.AgentSession{LastCollectedAt: &now, LastCollectionStatus: "ok"}
+			if tc.session != nil {
+				db.sessions[agentSessionKey(testUUID, "attempt-1")] = tc.session
+			}
+			h := NewAgentHandler(service.NewWorkflowService(db))
+			auth := middleware.NewAgentAuthMiddleware(apikey.NewKeyManager(filepath.Join(t.TempDir(), "missing-keys")), testTaskTokenSecret, false)
+			auth.SetRevokeStore(tokenrevoke.NewStore())
+			token, err := tasktoken.GenerateForAttempt(testTaskTokenSecret, testUUID, "attempt-1", "attempt-1", "", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/ready?agent_id=other-attempt", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			auth.Middleware(http.HandlerFunc(h.HandleReady)).ServeHTTP(response, req)
+			if response.Code != tc.want || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if tc.session == nil && db.sessions[agentSessionKey(testUUID, "attempt-1")] != nil {
+				t.Fatal("readiness probe fabricated a heartbeat")
+			}
+		})
+	}
+}
+
+func TestHandleReadyRejectsUnauthenticatedAndWrongMethod(t *testing.T) {
+	h := NewAgentHandler(service.NewWorkflowService(newAgentSessionDB()))
+	for method, want := range map[string]int{http.MethodPost: http.StatusUnauthorized, http.MethodGet: http.StatusMethodNotAllowed} {
+		response := httptest.NewRecorder()
+		h.HandleReady(response, httptest.NewRequest(method, "/api/v1/agent/ready", nil))
+		if response.Code != want {
+			t.Fatalf("%s returned %d", method, response.Code)
+		}
+	}
+}
