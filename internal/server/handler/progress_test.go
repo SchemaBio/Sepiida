@@ -2,12 +2,14 @@ package handler
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +23,43 @@ import (
 
 const testTaskTokenSecret = "0123456789abcdef0123456789abcdef"
 const testUUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+func TestDecodeCompressedProgressBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, encoding string
+		want                 int
+	}{
+		{"gzip", `{"uuid":"test"}`, "gzip", http.StatusOK},
+		{"oversized expanded JSON", `{"uuid":"` + strings.Repeat("x", maxJSONBodyBytes) + `"}`, "gzip", http.StatusRequestEntityTooLarge},
+		{"trailing JSON", `{} {}`, "gzip", http.StatusBadRequest},
+		{"unknown encoding", `{}`, "br", http.StatusUnsupportedMediaType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			writer := gzip.NewWriter(&buf)
+			if _, err := writer.Write([]byte(tc.body)); err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/progress", &buf)
+			req.Header.Set("Content-Encoding", tc.encoding)
+			rec := httptest.NewRecorder()
+			var got map[string]interface{}
+			ok := decodeJSONBody(rec, req, &got)
+			if rec.Code != tc.want || ok != (tc.want == http.StatusOK) {
+				t.Fatalf("code=%d ok=%v body=%s", rec.Code, ok, rec.Body.String())
+			}
+		})
+	}
+	bad := httptest.NewRequest(http.MethodPost, "/api/v1/progress", strings.NewReader("not gzip"))
+	bad.Header.Set("Content-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	if decodeJSONBody(rec, bad, &map[string]interface{}{}) || rec.Code != http.StatusBadRequest {
+		t.Fatal("accepted invalid gzip")
+	}
+}
 
 func TestHandleListWorkflowsCapsLimit(t *testing.T) {
 	fake := &listLimitDB{}

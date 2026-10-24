@@ -2,6 +2,7 @@ package sender
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,6 +13,32 @@ import (
 	"github.com/SchemaBio/Sepiida/internal/common/model"
 	"github.com/SchemaBio/Sepiida/internal/common/tasktoken"
 )
+
+func TestSendProgressCompressesLargeLogsWithoutChangingPayload(t *testing.T) {
+	progress := &model.WorkflowProgress{AgentID: "agent-1", UUID: "sample-uuid", Workflow: model.Workflow{ID: "run-1"}, Tasks: []model.Task{{Stderr: strings.Repeat("annotation log\n", 10000)}}}
+	s := NewHTTPSenderWithTaskToken("http://sepiida.test", "", "agent-1", "0123456789abcdef0123456789abcdef")
+	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Content-Encoding") != "gzip" || r.ContentLength >= 32<<10 {
+			t.Fatalf("large logs were not compressed: encoding=%q bytes=%d", r.Header.Get("Content-Encoding"), r.ContentLength)
+		}
+		reader, err := gzip.NewReader(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reader.Close()
+		var got model.WorkflowProgress
+		if err := json.NewDecoder(reader).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Tasks) != 1 || got.Tasks[0].Stderr != progress.Tasks[0].Stderr || got.AgentID != progress.AgentID || r.Header.Get("Authorization") == "" {
+			t.Fatal("compression lost logs or authenticated attempt identity")
+		}
+		return testResponse(http.StatusOK, ""), nil
+	})}
+	if err := s.SendProgress(progress); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSendProgressUsesTaskToken(t *testing.T) {
 	const secret = "0123456789abcdef0123456789abcdef"

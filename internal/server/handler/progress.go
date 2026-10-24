@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"io"
@@ -286,6 +287,21 @@ func authorizeTaskToken(w http.ResponseWriter, r *http.Request, uuid string, age
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))) {
+	case "", "identity":
+	case "gzip":
+		reader, err := gzip.NewReader(r.Body)
+		if err != nil {
+			http.Error(w, "invalid compressed request body", http.StatusBadRequest)
+			return false
+		}
+		defer reader.Close()
+		// Bound both the wire body and decompressed JSON independently.
+		r.Body = http.MaxBytesReader(w, reader, maxJSONBodyBytes)
+	default:
+		http.Error(w, "unsupported content encoding", http.StatusUnsupportedMediaType)
+		return false
+	}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(dst); err != nil {
 		var maxBytesErr *http.MaxBytesError

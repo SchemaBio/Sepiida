@@ -2,6 +2,7 @@ package sender
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -100,6 +101,23 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal progress: %w", err)
 	}
+	// Large embedded task logs can stall public callbacks. Compress them
+	// without dropping logs or acknowledging only part of a progress report.
+	compressed := false
+	if len(body) >= 32<<10 {
+		var buf bytes.Buffer
+		writer := gzip.NewWriter(&buf)
+		if _, err := writer.Write(body); err != nil {
+			return fmt.Errorf("failed to compress progress: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return fmt.Errorf("failed to compress progress: %w", err)
+		}
+		if buf.Len() < len(body) {
+			body = buf.Bytes()
+			compressed = true
+		}
+	}
 
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -107,6 +125,9 @@ func (s *HTTPSender) SendProgress(progress *model.WorkflowProgress) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if compressed {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 	if err := s.authorize(req, progress.UUID, progress.Workflow.ID); err != nil {
 		return err
 	}
